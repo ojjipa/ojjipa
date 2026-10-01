@@ -1,0 +1,147 @@
+use crate::platform::AgentActivity;
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
+use tokio::time::timeout;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const PROTOCOL_VERSION: u8 = 1;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HelloMessage {
+    message_type: String,
+    protocol_version: u8,
+    token: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivityMessage<'a> {
+    protocol_version: u8,
+    message_type: &'static str,
+    payload: &'a AgentActivity,
+}
+
+pub async fn run(mut activity_rx: mpsc::Receiver<AgentActivity>) -> Result<(), String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|error| format!("Could not open the local engine socket: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("Could not read the local engine socket address: {error}"))?;
+    let token = create_token()?;
+    let mut child = launch_engine(address.port(), &token)?;
+
+    let (stream, _) = tokio::select! {
+        accepted = listener.accept() => accepted
+            .map_err(|error| format!("Could not accept the engine connection: {error}"))?,
+        status = child.wait() => {
+            return Err(format!("Python engine exited before connecting: {status:?}"));
+        }
+    };
+    let mut socket = timeout(HANDSHAKE_TIMEOUT, accept_async(stream))
+        .await
+        .map_err(|_| "Timed out waiting for the Python engine handshake".to_owned())?
+        .map_err(|error| format!("WebSocket handshake failed: {error}"))?;
+
+    let hello = timeout(HANDSHAKE_TIMEOUT, socket.next())
+        .await
+        .map_err(|_| "Timed out waiting for the Python engine hello".to_owned())?
+        .ok_or_else(|| "Python engine disconnected before hello".to_owned())?
+        .map_err(|error| format!("Could not read Python engine hello: {error}"))?;
+    let hello_text = hello
+        .to_text()
+        .map_err(|_| "Python engine hello must be a text message".to_owned())?;
+    let hello: HelloMessage = serde_json::from_str(hello_text)
+        .map_err(|error| format!("Invalid Python engine hello: {error}"))?;
+    if hello.message_type != "hello"
+        || hello.protocol_version != PROTOCOL_VERSION
+        || hello.token != token
+    {
+        return Err("Python engine handshake was rejected".into());
+    }
+
+    socket
+        .send(Message::Text(
+            r#"{"messageType":"ready","protocolVersion":1}"#.into(),
+        ))
+        .await
+        .map_err(|error| format!("Could not acknowledge the Python engine: {error}"))?;
+
+    loop {
+        tokio::select! {
+            activity = activity_rx.recv() => {
+                let Some(activity) = activity else { break };
+                let message = ActivityMessage {
+                    protocol_version: PROTOCOL_VERSION,
+                    message_type: "activity",
+                    payload: &activity,
+                };
+                let json = serde_json::to_string(&message)
+                    .map_err(|error| format!("Could not encode activity category: {error}"))?;
+                socket.send(Message::Text(json.into())).await
+                    .map_err(|error| format!("Could not send activity to Python: {error}"))?;
+            }
+            incoming = socket.next() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        socket.send(Message::Pong(payload)).await
+                            .map_err(|error| format!("WebSocket ping response failed: {error}"))?;
+                    }
+                    Some(Ok(_)) => {},
+                    Some(Err(error)) => return Err(format!("WebSocket connection failed: {error}")),
+                }
+            }
+            status = child.wait() => {
+                return Err(format!("Python engine exited: {status:?}"));
+            }
+        }
+    }
+
+    let _ = child.kill().await;
+    Ok(())
+}
+
+fn launch_engine(port: u16, token: &str) -> Result<Child, String> {
+    let script = std::env::var_os("OJJIPA_ENGINE_SCRIPT")
+        .map(Into::into)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../engine/python/bridge.py")
+        });
+    if !script.is_file() {
+        return Err(format!("Python engine script was not found at {}", script.display()));
+    }
+
+    let python = std::env::var_os("OJJIPA_PYTHON").unwrap_or_else(|| {
+        if cfg!(target_os = "windows") {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    Command::new(python)
+        .arg(script)
+        .env("OJJIPA_BRIDGE_URL", format!("ws://127.0.0.1:{port}"))
+        .env("OJJIPA_BRIDGE_TOKEN", token)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("Could not start the Python engine: {error}"))
+}
+
+fn create_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("Could not create the engine session token: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
