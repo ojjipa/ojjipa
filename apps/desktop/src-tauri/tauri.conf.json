@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OJJIPA",
+  "productName": "desktop",
   "version": "0.1.0",
-  "identifier": "com.ojjipa.desktop",
+  "identifier": "com.admin.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,16 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "OJJIPA",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 600,
-        "resizable": true,
+        "title": "desktop",
+        "width": 800,
+        "height": 600,
         "fullscreen": false,
         "decorations": true,
-        "transparent": false,
-        "center": true
+        "transparent": false
       }
     ],
     "security": {
