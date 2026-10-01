@@ -792,6 +792,7 @@ dependencies = [
  "anyhow",
  "cocoa",
  "futures-util",
+ "getrandom 0.3.4",
  "objc",
  "serde",
  "serde_json",
