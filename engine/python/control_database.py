@@ -1,5 +1,7 @@
+from contextlib import contextmanager
 from pathlib import Path
 import sqlite3
+from typing import Iterator
 
 
 class ControlDatabase:
@@ -12,7 +14,6 @@ class ControlDatabase:
         self.connection.execute("PRAGMA journal_mode = WAL")
         try:
             self._apply_migrations(migrations_dir)
-            self._close_interrupted_activity()
         except Exception:
             self.connection.close()
             raise
@@ -50,39 +51,18 @@ class ControlDatabase:
             )
             version = migration_version
 
-    def record_activity(self, category: str) -> None:
-        with self.connection:
-            active = self.connection.execute(
-                "SELECT category FROM user_activity WHERE end_time IS NULL "
-                "ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if active is not None and active["category"] == category:
-                return
-
-            self.connection.execute(
-                "UPDATE user_activity "
-                "SET end_time = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                "WHERE end_time IS NULL"
-            )
-            self.connection.execute(
-                "INSERT INTO user_activity (category) VALUES (?)", (category,)
-            )
-
-    def _close_interrupted_activity(self) -> None:
-        with self.connection:
-            self.connection.execute(
-                "UPDATE user_activity "
-                "SET end_time = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                "WHERE end_time IS NULL"
-            )
-
-    def close_activity(self) -> None:
-        with self.connection:
-            self.connection.execute(
-                "UPDATE user_activity "
-                "SET end_time = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
-                "WHERE end_time IS NULL"
-            )
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        if self.connection.in_transaction:
+            raise RuntimeError("Nested database transactions are not supported")
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            self.connection.rollback()
+            raise
+        else:
+            self.connection.commit()
 
     def close(self) -> None:
         self.connection.close()
