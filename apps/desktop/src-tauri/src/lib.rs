@@ -1,7 +1,8 @@
 mod bridge;
 mod platform;
 
-use tauri::State;
+use std::{fs, time::Duration};
+use tauri::{Manager, State};
 use tokio::sync::mpsc;
 
 struct BridgeState {
@@ -34,13 +35,46 @@ async fn get_agent_activity(
 pub fn run() {
     let (activity_tx, activity_rx) = mpsc::channel(32);
     tauri::Builder::default()
-        .manage(BridgeState { activity_tx })
-        .setup(|_app| {
+        .manage(BridgeState {
+            activity_tx: activity_tx.clone(),
+        })
+        .setup(move |app| {
+            let app_data_dir = app.path().app_data_dir()?;
+            fs::create_dir_all(&app_data_dir)?;
+            let database_path = app_data_dir.join("ojjipa.sqlite");
+
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = bridge::run(activity_rx).await {
+                if let Err(error) = bridge::run(activity_rx, database_path).await {
                     eprintln!("OJJIPA engine bridge stopped: {error}");
                 }
             });
+
+            let activity_tx = activity_tx.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(3));
+                let mut previous_category = None;
+
+                loop {
+                    interval.tick().await;
+                    let category = match platform::active_window() {
+                        Ok(Some(window)) => window.category(),
+                        Ok(None) => platform::ActivityCategory::Unknown,
+                        Err(_) => continue,
+                    };
+
+                    if previous_category != Some(category) {
+                        previous_category = Some(category);
+                        if let Err(error) = activity_tx
+                            .send(platform::AgentActivity { category })
+                            .await
+                        {
+                            eprintln!("Could not send activity category to the engine: {error}");
+                            break;
+                        }
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
