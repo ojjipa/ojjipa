@@ -7,7 +7,11 @@ from typing import Iterator
 class ControlDatabase:
     def __init__(self, database_path: Path, migrations_dir: Path):
         database_path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(database_path, timeout=5)
+        # Disable sqlite3's implicit transactions. Runtime writes are grouped
+        # only by the explicit transaction() context manager below.
+        self.connection = sqlite3.connect(
+            database_path, timeout=5, isolation_level=None, check_same_thread=False
+        )
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
         self.connection.execute("PRAGMA busy_timeout = 5000")

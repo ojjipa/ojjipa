@@ -49,6 +49,7 @@ def intake_dump(
                 source=draft.source,
                 termination_condition=draft.termination_condition,
                 scope=draft.scope,
+                config=draft.config,
             )
         decision_record = DecisionsRepository(db).record(
             dump_id=dump.id,
@@ -86,6 +87,14 @@ def close_activity(db: ControlDatabase) -> None:
         ActivityRepository(db).close_open_interval()
 
 
+def save_dump(db: ControlDatabase, content: str) -> Dump:
+    """Persist an unclassified user dump before any model decision is made."""
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("dump content must be a non-empty string")
+    with db.transaction():
+        return DumpsRepository(db).create(content)
+
+
 def update_minipa_status(
     db: ControlDatabase,
     minipa_id: int,
@@ -93,8 +102,21 @@ def update_minipa_status(
 ) -> Optional[Minipa]:
     with db.transaction():
         repository = MiniPaRepository(db)
-        if not repository.update_status(minipa_id, status):
+        current = repository.get_by_id(minipa_id)
+        if current is None:
             return None
+        allowed = {
+            MinipaStatus.ACTIVE: {MinipaStatus.PAUSED, MinipaStatus.RETIRED},
+            MinipaStatus.PAUSED: {MinipaStatus.ACTIVE, MinipaStatus.RETIRED},
+            MinipaStatus.RETIRED: set(),
+        }
+        if status == current.status:
+            return current
+        if status not in allowed[current.status]:
+            raise ValueError(
+                f"MiniPa cannot transition from {current.status.value} to {status.value}"
+            )
+        repository.update_status(minipa_id, status)
         return repository.get_by_id(minipa_id)
 
 
@@ -105,9 +127,32 @@ def update_hold_status(
 ) -> Optional[HeldItem]:
     with db.transaction():
         repository = HoldQueueRepository(db)
-        if not repository.update_status(item_id, status):
+        current = repository.get_by_id(item_id)
+        if current is None:
             return None
+        if current.status != HoldStatus.HELD:
+            if current.status == status:
+                return current
+            raise ValueError(
+                f"Hold item cannot transition from {current.status.value} to {status.value}"
+            )
+        if status == HoldStatus.HELD:
+            return current
+        repository.update_status(item_id, status)
         return repository.get_by_id(item_id)
+
+
+def list_held_items(db: ControlDatabase, limit: int = 100) -> list[HeldItem]:
+    return HoldQueueRepository(db).list_held(limit)
+
+
+def count_held_items(db: ControlDatabase) -> int:
+    return HoldQueueRepository(db).count_held()
+
+
+def expire_due_hold_items(db: ControlDatabase) -> int:
+    with db.transaction():
+        return HoldQueueRepository(db).expire_due()
 
 
 def record_grandpa_action(

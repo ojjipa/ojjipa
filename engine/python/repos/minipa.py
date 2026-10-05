@@ -13,6 +13,7 @@ def _to_minipa(row: sqlite3.Row) -> Minipa:
         source=row["source"],
         termination_condition=row["termination_condition"],
         scope=row["scope"],
+        config=row["config"],
         status=MinipaStatus(row["status"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -32,12 +33,13 @@ class MiniPaRepository:
         source: Optional[str] = None,
         termination_condition: Optional[str] = None,
         scope: str = "global",
+        config: str = "{}",
     ) -> Minipa:
         cursor = self._database.connection.execute(
             "INSERT INTO minipa "
-            "(kind, purpose, source, termination_condition, scope) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (kind.value, purpose, source, termination_condition, scope),
+            "(kind, purpose, source, termination_condition, scope, config) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (kind.value, purpose, source, termination_condition, scope, config),
         )
         minipa = self.get_by_id(int(cursor.lastrowid))
         assert minipa is not None
@@ -45,7 +47,7 @@ class MiniPaRepository:
 
     def get_by_id(self, minipa_id: int) -> Optional[Minipa]:
         row = self._database.connection.execute(
-            "SELECT id, kind, purpose, source, termination_condition, scope, "
+            "SELECT id, kind, purpose, source, termination_condition, scope, config, "
             "status, created_at, updated_at FROM minipa WHERE id = ?",
             (minipa_id,),
         ).fetchone()
@@ -53,7 +55,7 @@ class MiniPaRepository:
 
     def list_active(self) -> List[Minipa]:
         rows = self._database.connection.execute(
-            "SELECT id, kind, purpose, source, termination_condition, scope, "
+            "SELECT id, kind, purpose, source, termination_condition, scope, config, "
             "status, created_at, updated_at FROM minipa "
             "WHERE status = 'active' ORDER BY created_at DESC, id DESC"
         ).fetchall()

@@ -50,6 +50,7 @@ class Minipa:
     source: Optional[str]
     termination_condition: Optional[str]
     scope: str
+    config: str
     status: MinipaStatus
     created_at: str
     updated_at: str
@@ -62,6 +63,7 @@ class MinipaDraft:
     source: Optional[str] = None
     termination_condition: Optional[str] = None
     scope: str = "global"
+    config: str = "{}"
 
 
 @dataclass(frozen=True)
