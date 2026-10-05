@@ -1,15 +1,30 @@
 use crate::platform::AgentActivity;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const PROTOCOL_VERSION: u8 = 1;
+
+pub type PendingRequests = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
+
+pub struct DumpRequest {
+    pub request_id: String,
+    pub content: String,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,8 +42,34 @@ struct ActivityMessage<'a> {
     payload: &'a AgentActivity,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DumpSubmitMessage<'a> {
+    protocol_version: u8,
+    message_type: &'static str,
+    request_id: &'a str,
+    payload: DumpPayload<'a>,
+}
+
+#[derive(Serialize)]
+struct DumpPayload<'a> {
+    content: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineResponse {
+    protocol_version: u8,
+    message_type: String,
+    request_id: Option<String>,
+    result: Option<Value>,
+    error: Option<String>,
+}
+
 pub async fn run(
     mut activity_rx: mpsc::Receiver<AgentActivity>,
+    mut dump_rx: mpsc::Receiver<DumpRequest>,
+    pending_requests: PendingRequests,
     database_path: PathBuf,
 ) -> Result<(), String> {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -90,12 +131,31 @@ pub async fn run(
                 socket.send(Message::Text(json.into())).await
                     .map_err(|error| format!("Could not send activity to Python: {error}"))?;
             }
+            dump = dump_rx.recv() => {
+                let Some(dump) = dump else { break };
+                let message = DumpSubmitMessage {
+                    protocol_version: PROTOCOL_VERSION,
+                    message_type: "dump.submit",
+                    request_id: &dump.request_id,
+                    payload: DumpPayload { content: &dump.content },
+                };
+                let json = serde_json::to_string(&message)
+                    .map_err(|error| format!("Could not encode dump submission: {error}"))?;
+                socket.send(Message::Text(json.into())).await
+                    .map_err(|error| format!("Could not send dump to Python: {error}"))?;
+            }
             incoming = socket.next() => {
                 match incoming {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(payload))) => {
                         socket.send(Message::Pong(payload)).await
                             .map_err(|error| format!("WebSocket ping response failed: {error}"))?;
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<EngineResponse>(&text) {
+                            Ok(response) => complete_request(&pending_requests, response),
+                            Err(error) => eprintln!("Ignoring invalid engine response: {error}"),
+                        }
                     }
                     Some(Ok(_)) => {},
                     Some(Err(error)) => return Err(format!("WebSocket connection failed: {error}")),
@@ -112,6 +172,37 @@ pub async fn run(
         let _ = child.kill().await;
     }
     Ok(())
+}
+
+fn complete_request(pending_requests: &PendingRequests, response: EngineResponse) {
+    if response.protocol_version != PROTOCOL_VERSION {
+        eprintln!("Ignoring engine response with an unsupported protocol version");
+        return;
+    }
+
+    let Some(request_id) = response.request_id else {
+        return;
+    };
+    let result = match response.message_type.as_str() {
+        "bridge.ack" => response
+            .result
+            .ok_or_else(|| "Python engine acknowledgement did not include a result".to_owned()),
+        "bridge.error" => Err(response
+            .error
+            .unwrap_or_else(|| "Python engine returned an unspecified error".to_owned())),
+        _ => return,
+    };
+
+    let sender = match pending_requests.lock() {
+        Ok(mut requests) => requests.remove(&request_id),
+        Err(_) => {
+            eprintln!("Pending request map is unavailable because its mutex was poisoned");
+            return;
+        }
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(result);
+    }
 }
 
 fn launch_engine(port: u16, token: &str, database_path: &std::path::Path) -> Result<Child, String> {

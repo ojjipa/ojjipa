@@ -1,5 +1,5 @@
 import sqlite3
-from typing import Optional
+from typing import List, Optional
 
 from control_database import ControlDatabase
 from .types import HeldItem, HoldStatus
@@ -48,6 +48,31 @@ class HoldQueueRepository:
             (item_id,),
         ).fetchone()
         return _to_held_item(row) if row is not None else None
+
+    def list_held(self, limit: int = 100) -> List[HeldItem]:
+        if limit < 1:
+            raise ValueError("limit must be greater than zero")
+        rows = self._database.connection.execute(
+            "SELECT id, report_id, status, created_at, expires_at, surfaced_at "
+            "FROM hold_queue WHERE status = 'held' "
+            "ORDER BY created_at ASC, id ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_to_held_item(row) for row in rows]
+
+    def count_held(self) -> int:
+        row = self._database.connection.execute(
+            "SELECT COUNT(*) AS count FROM hold_queue WHERE status = 'held'"
+        ).fetchone()
+        return int(row["count"])
+
+    def expire_due(self) -> int:
+        cursor = self._database.connection.execute(
+            "UPDATE hold_queue SET status = 'expired' "
+            "WHERE status = 'held' AND expires_at IS NOT NULL "
+            "AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
+        )
+        return cursor.rowcount
 
     def update_status(self, item_id: int, status: HoldStatus) -> bool:
         if status == HoldStatus.SURFACED:
