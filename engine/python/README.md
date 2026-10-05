@@ -20,3 +20,17 @@ loopback listener are created for each app run.
 The Python engine is currently a source script that requires a Python runtime
 and the listed dependency on the host. Packaging a self-contained Python
 sidecar for Windows and macOS is a separate release step.
+
+## Control database
+
+The desktop process passes the platform's application-data path to the Python
+engine as `OJJIPA_DATABASE_PATH`. The engine creates `ojjipa.sqlite` there,
+enables SQLite foreign-key checks and WAL mode, and applies numbered SQL files
+from `migrations/` using SQLite's `user_version`. A migration is applied only
+once; the engine stops if the database was created by a newer schema version.
+
+The desktop samples the active window category every three seconds and sends
+only category changes over the local bridge. The Python engine stores those
+changes in `user_activity`, closing the previous interval when a new category
+arrives. It stores categories only; window titles and application names are
+not sent to Python or written to the database.

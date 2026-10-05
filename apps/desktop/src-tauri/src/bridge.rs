@@ -1,8 +1,7 @@
 use crate::platform::AgentActivity;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::process::Stdio;
-use std::time::Duration;
+use std::{path::PathBuf, process::Stdio, time::Duration};
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
@@ -28,7 +27,10 @@ struct ActivityMessage<'a> {
     payload: &'a AgentActivity,
 }
 
-pub async fn run(mut activity_rx: mpsc::Receiver<AgentActivity>) -> Result<(), String> {
+pub async fn run(
+    mut activity_rx: mpsc::Receiver<AgentActivity>,
+    database_path: PathBuf,
+) -> Result<(), String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|error| format!("Could not open the local engine socket: {error}"))?;
@@ -36,7 +38,7 @@ pub async fn run(mut activity_rx: mpsc::Receiver<AgentActivity>) -> Result<(), S
         .local_addr()
         .map_err(|error| format!("Could not read the local engine socket address: {error}"))?;
     let token = create_token()?;
-    let mut child = launch_engine(address.port(), &token)?;
+    let mut child = launch_engine(address.port(), &token, &database_path)?;
 
     let (stream, _) = tokio::select! {
         accepted = listener.accept() => accepted
@@ -105,11 +107,14 @@ pub async fn run(mut activity_rx: mpsc::Receiver<AgentActivity>) -> Result<(), S
         }
     }
 
-    let _ = child.kill().await;
+    let _ = socket.close(None).await;
+    if timeout(Duration::from_secs(2), child.wait()).await.is_err() {
+        let _ = child.kill().await;
+    }
     Ok(())
 }
 
-fn launch_engine(port: u16, token: &str) -> Result<Child, String> {
+fn launch_engine(port: u16, token: &str, database_path: &std::path::Path) -> Result<Child, String> {
     let script = std::env::var_os("OJJIPA_ENGINE_SCRIPT")
         .map(Into::into)
         .unwrap_or_else(|| {
@@ -131,6 +136,7 @@ fn launch_engine(port: u16, token: &str) -> Result<Child, String> {
         .arg(script)
         .env("OJJIPA_BRIDGE_URL", format!("ws://127.0.0.1:{port}"))
         .env("OJJIPA_BRIDGE_TOKEN", token)
+        .env("OJJIPA_DATABASE_PATH", database_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
