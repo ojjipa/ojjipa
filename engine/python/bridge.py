@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import websockets
 from control_database import ControlDatabase
+from services import close_activity, record_activity, recover_activity
 
 PROTOCOL_VERSION = 1
 ALLOWED_CATEGORIES = {"coding", "meeting", "messaging", "reading", "unknown"}
@@ -16,8 +17,8 @@ async def run() -> None:
         database_path=Path(os.environ["OJJIPA_DATABASE_PATH"]),
         migrations_dir=Path(__file__).parent / "migrations",
     )
-
     try:
+        recover_activity(database)
         async with websockets.connect(url, max_size=64 * 1024) as socket:
             await socket.send(
                 json.dumps(
@@ -44,9 +45,9 @@ async def run() -> None:
                     or payload["category"] not in ALLOWED_CATEGORIES
                 ):
                     raise ValueError("Received an invalid or unsanitized activity message")
-                database.record_activity(payload["category"])
+                record_activity(database, payload["category"])
     finally:
-        database.close_activity()
+        close_activity(database)
         database.close()
 
 
