@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "desktop",
+  "productName": "OJJIPA",
   "version": "0.1.0",
   "identifier": "com.admin.desktop",
   "build": {
@@ -12,28 +12,44 @@
   "app": {
     "windows": [
       {
-        "title": "desktop",
-        "width": 800,
-        "height": 600,
+        "title": "OJJIPA",
+        "width": 1120,
+        "height": 800,
         "fullscreen": false,
         "decorations": true,
-        "transparent": false
+        "transparent": false,
+        "minWidth": 740,
+        "minHeight": 580
+      },
+      {
+        "label": "dump",
+        "title": "Capture a thought",
+        "url": "index.html?view=dump",
+        "width": 630,
+        "height": 130,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "center": true,
+        "shadow": false
       }
     ],
     "security": {
       "csp": null
-    },
-    "trayIcon": {
-      "id": "main",
-      "iconPath": "icons/icon.ico",
-      "iconAsTemplate": false
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/icon.ico"
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
     ]
   }
 }

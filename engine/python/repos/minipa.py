@@ -61,6 +61,14 @@ class MiniPaRepository:
         ).fetchall()
         return [_to_minipa(row) for row in rows]
 
+    def list_recent(self, limit: int = 100) -> List[Minipa]:
+        if not 1 <= limit <= 100:
+            raise ValueError('Limit must be between 1 and 100')
+        rows = self._database.connection.execute(
+            'SELECT * FROM minipa ORDER BY created_at DESC, id DESC LIMIT ?', (limit,)
+        ).fetchall()
+        return [_to_minipa(row) for row in rows]
+
     def update_status(self, minipa_id: int, status: MinipaStatus) -> bool:
         cursor = self._database.connection.execute(
             "UPDATE minipa SET status = ? WHERE id = ?", (status.value, minipa_id)

@@ -1,5 +1,11 @@
 # OJJIPA Python engine bridge
 
+The attention subsystem now combines SHA-256 deduplication, a delivery FSM,
+monotonic activity timing and conservative delivery policy. It consumes category
+heartbeats every three seconds and checks the queue every second. Repeated
+categories do not add duplicate activity intervals. See
+[Hold queue](../../docs/HOLD_QUEUE.md) for the services, desktop commands and checks.
+
 The Tauri Rust process starts `bridge.py` and hosts a WebSocket listener bound
 to loopback on an ephemeral port. For local development, install the Python
 dependency with:

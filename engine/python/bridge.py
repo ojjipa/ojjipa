@@ -1,13 +1,30 @@
 import asyncio
 import json
+import sys
 import os
+import logging
+from dataclasses import asdict
 from pathlib import Path
 import websockets
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from control_database import ControlDatabase
 from services import close_activity, recover_activity, record_activity, save_dump
+from attention import AttentionController
+from repos import DumpsRepository, MiniPaRepository
+from repos.types import MinipaStatus
+from services import update_minipa_status
 
 PROTOCOL_VERSION = 1
 ALLOWED_CATEGORIES = {"coding", "meeting", "messaging", "reading", "unknown"}
+
+
+async def attention_loop(attention):
+    while True:
+        await asyncio.sleep(1)
+        try:
+            await asyncio.to_thread(attention.tick)
+        except Exception:
+            logging.exception('Attention check failed; retrying on next tick')
 
 
 async def run() -> None:
@@ -17,6 +34,8 @@ async def run() -> None:
         database_path=Path(os.environ["OJJIPA_DATABASE_PATH"]),
         migrations_dir=Path(__file__).parent / "migrations",
     )
+    attention = AttentionController(database)
+    ticker = None
     try:
         recover_activity(database)
         async with websockets.connect(url, max_size=64 * 1024) as socket:
@@ -33,6 +52,8 @@ async def run() -> None:
             if ready != {"messageType": "ready", "protocolVersion": PROTOCOL_VERSION}:
                 raise RuntimeError("Rust bridge rejected the protocol handshake")
 
+            ticker = asyncio.create_task(attention_loop(attention))
+
             async for raw_message in socket:
                 request_id = None
                 try:
@@ -41,7 +62,7 @@ async def run() -> None:
                         raise ValueError("message must be a JSON object")
                     request_id = message.get("requestId")
                     result = await asyncio.to_thread(
-                        handle_message, database, message
+                        handle_message, database, message, attention
                     )
                     response = {
                         "messageType": "bridge.ack",
@@ -58,11 +79,16 @@ async def run() -> None:
                     }
                 await socket.send(json.dumps(response))
     finally:
+        if ticker is not None:
+            ticker.cancel()
+            await asyncio.gather(ticker, return_exceptions=True)
+        # A cancelled to_thread call can still be finishing a transaction.
+        await asyncio.get_running_loop().shutdown_default_executor()
         close_activity(database)
         database.close()
 
 
-def handle_message(database: ControlDatabase, message: dict) -> dict:
+def handle_message(database: ControlDatabase, message: dict, attention=None) -> dict:
     """Handle one validated request off the asyncio event loop."""
     if message.get("protocolVersion") != PROTOCOL_VERSION:
         raise ValueError("unsupported bridge protocol version")
@@ -78,8 +104,32 @@ def handle_message(database: ControlDatabase, message: dict) -> dict:
             or payload["category"] not in ALLOWED_CATEGORIES
         ):
             raise ValueError("invalid activity payload")
-        record_activity(database, payload["category"])
+        if attention is None:
+            record_activity(database, payload["category"])
+        else:
+            attention.observe(payload["category"])
         return {"accepted": True}
+
+    if message_type in ('attention.get', 'attention.settings', 'attention.surface', 'attention.dismiss'):
+        if attention is None:
+            raise RuntimeError('Attention controller is unavailable')
+        return attention.dispatch(message_type, payload)
+
+    if message_type == 'workspace.get':
+        if payload or attention is None:
+            raise ValueError('workspace.get takes no arguments and requires attention')
+        state = attention.dispatch('attention.get', {})
+        state['minipas'] = [asdict(agent) for agent in MiniPaRepository(database).list_recent()]
+        state['dumps'] = [asdict(dump) for dump in DumpsRepository(database).list_recent(10)]
+        return state
+
+    if message_type == 'minipa.update':
+        if set(payload) != {'id', 'status'} or type(payload['id']) is not int or payload['id'] < 1:
+            raise ValueError('A MiniPa ID and status are required')
+        agent = update_minipa_status(database, payload['id'], MinipaStatus(payload['status']))
+        if agent is None:
+            raise ValueError('MiniPa not found')
+        return asdict(agent)
 
     if message_type == "dump.submit":
         if set(payload) != {"content"} or not isinstance(payload.get("content"), str):
