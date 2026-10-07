@@ -55,9 +55,11 @@ impl ActiveWindow {
         )
         .to_lowercase();
 
-        if ["code", "terminal", "vscode", "pycharm", "cursor", "vim", "neovim"]
-            .iter()
-            .any(|term| searchable.contains(term))
+        if [
+            "code", "terminal", "vscode", "pycharm", "cursor", "vim", "neovim",
+        ]
+        .iter()
+        .any(|term| searchable.contains(term))
         {
             ActivityCategory::Coding
         } else if ["zoom", "meet", "teams"]
@@ -75,8 +77,7 @@ impl ActiveWindow {
             .any(|term| searchable.contains(term))
         {
             ActivityCategory::Reading
-        }  
-        else {
+        } else {
             ActivityCategory::Unknown
         }
     }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "desktop",
+  "productName": "OJJIPA",
   "version": "0.1.0",
   "identifier": "com.admin.desktop",
   "build": {
@@ -12,12 +12,35 @@
   "app": {
     "windows": [
       {
-        "title": "desktop",
-        "width": 800,
-        "height": 600,
+        "title": "OJJIPA",
+        "label": "main",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 760,
+        "minHeight": 620,
         "fullscreen": false,
         "decorations": true,
         "transparent": false
+      },
+      {
+        "title": "OJJIPA Quick Capture",
+        "label": "capture",
+        "url": "index.html?capture=1",
+        "width": 580,
+        "height": 176,
+        "minWidth": 420,
+        "minHeight": 160,
+        "maxWidth": 720,
+        "maxHeight": 220,
+        "fullscreen": false,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": true,
+        "center": true,
+        "shadow": true
       }
     ],
     "security": {
@@ -25,7 +48,7 @@
     },
     "trayIcon": {
       "id": "main",
-      "iconPath": "icons/icon.ico",
+      "iconPath": "icons/icon.png",
       "iconAsTemplate": false
     }
   },
@@ -33,6 +56,10 @@
     "active": true,
     "targets": "all",
     "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
       "icons/icon.ico"
     ]
   }

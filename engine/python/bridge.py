@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 import websockets
 from control_database import ControlDatabase
-from services import close_activity, recover_activity, record_activity, save_dump
+from model_gateway import ModelError, decide_dump
+from services import close_activity, intake_dump, recover_activity, record_activity, save_dump
 
 PROTOCOL_VERSION = 1
 ALLOWED_CATEGORIES = {"coding", "meeting", "messaging", "reading", "unknown"}
@@ -82,13 +83,52 @@ def handle_message(database: ControlDatabase, message: dict) -> dict:
         return {"accepted": True}
 
     if message_type == "dump.submit":
-        if set(payload) != {"content"} or not isinstance(payload.get("content"), str):
-            raise ValueError("dump.submit payload must contain only string content")
-        dump = save_dump(database, payload["content"])
+        if (
+            set(payload) != {"content", "maxThinkingSeconds"}
+            or not isinstance(payload.get("content"), str)
+            or not isinstance(payload.get("maxThinkingSeconds"), int)
+            or isinstance(payload.get("maxThinkingSeconds"), bool)
+            or not 5 <= payload["maxThinkingSeconds"] <= 120
+        ):
+            raise ValueError(
+                "dump.submit requires string content and a thinking limit from 5 to 120 seconds"
+            )
+        content = payload["content"]
+        if not content.strip():
+            raise ValueError("dump content must be a non-empty string")
+
+        try:
+            decision = decide_dump(content, payload["maxThinkingSeconds"])
+        except ModelError as error:
+            dump = save_dump(database, content)
+            return {
+                "dumpId": dump.id,
+                "content": dump.content,
+                "createdAt": dump.created_at,
+                "decisionStatus": "pending",
+                "analysisError": str(error),
+            }
+
+        dump, decision_record, minipa = intake_dump(database, content, decision)
         return {
             "dumpId": dump.id,
             "content": dump.content,
             "createdAt": dump.created_at,
+            "decisionStatus": "complete",
+            "decision": {
+                "id": decision_record.id,
+                "verdict": decision_record.verdict.value,
+                "reason": decision_record.reason,
+                "minipa": (
+                    {
+                        "id": minipa.id,
+                        "kind": minipa.kind.value,
+                        "purpose": minipa.purpose,
+                    }
+                    if minipa is not None
+                    else None
+                ),
+            },
         }
 
     raise ValueError(f"unsupported message type: {message_type!r}")

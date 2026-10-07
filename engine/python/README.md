@@ -14,11 +14,38 @@ interpreter and script paths for development.
 
 Protocol version 1 accepts activity messages whose payload contains only a
 category (`coding`, `meeting`, `messaging`, `reading`, or `unknown`), and
-`dump.submit` messages whose payload contains only the user's `content`. Each
-request receives a `bridge.ack` or `bridge.error` response carrying its
-`requestId`. Dump submission persists the raw text; model classification is a
-separate step. Raw window titles and app names are not part of this protocol.
-The session token and loopback listener are created for each app run.
+`dump.submit` messages with the user's `content` and a `maxThinkingSeconds`
+limit (5-120 seconds). Each request receives a `bridge.ack` or `bridge.error`
+response carrying its `requestId`. Grandpa classifies a thought through the
+Nebius Token Factory OpenAI-compatible chat-completions API and records its
+decision and any resulting MiniPa draft with the dump. MiniPa execution is not
+yet connected. If inference is not configured or fails, the raw thought is
+still saved and returned as pending, with an explicit error.
+
+In the desktop app, open **Settings** to enter the Nebius API key, Grandpa
+model ID, and MiniPa model ID. OJJIPA stores the API key in the operating
+system credential manager and the model IDs in its private app settings; the
+API key is never returned to or stored by the webview. OJJIPA does not check
+the credential manager until a key has been configured. Quit and reopen OJJIPA
+after saving so the Python engine starts with the updated settings. Grandpa's
+model ID must be enabled in your Nebius Token Factory project.
+`NEBIUS_API_KEY`, `OJJIPA_GRANDPA_MODEL`, and
+`OJJIPA_MINIPA_MODEL` remain available as environment-variable fallbacks when
+no saved setting exists, for development. MiniPa execution is not yet connected,
+so its model ID is saved for later use only.
+
+The selected duration is a maximum API request time; a completed inference
+returns immediately. Raw window titles and app names are not part of the
+bridge protocol. The session token and loopback listener are created for each
+app run.
+
+The desktop shell, rather than this Python bridge, owns the system-wide
+quick-capture shortcut and native notifications. Capture-save updates and
+capture failures currently generate notifications according to the user's
+settings. Task-completion, scheduled-reminder, and surfaced-item notification
+preferences are present in the desktop UI, but their background event sources
+are not connected until the corresponding worker and reminder flows are
+implemented.
 
 The Python engine is currently a source script that requires a Python runtime
 and the listed dependency on the host. Packaging a self-contained Python

@@ -4,7 +4,7 @@
 // - What CFStringGetMaximumSizeForEncoding is sizing
 use super::ActiveWindow;
 use objc::{class, msg_send, sel, sel_impl};
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::ptr;
 
 type ObjcId = *mut objc::runtime::Object;
@@ -71,7 +71,11 @@ fn ns_string(value: ObjcId) -> Option<String> {
     if utf8.is_null() {
         return None;
     }
-    Some(unsafe { CStr::from_ptr(utf8) }.to_string_lossy().into_owned())
+    Some(
+        unsafe { CStr::from_ptr(utf8) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn focused_window_title(process_id: i32) -> Option<String> {
@@ -99,9 +103,8 @@ fn focused_window_title(process_id: i32) -> Option<String> {
         }
     };
     let mut title_value = ptr::null();
-    let title_result = unsafe {
-        AXUIElementCopyAttributeValue(focused_window, title_attribute, &mut title_value)
-    };
+    let title_result =
+        unsafe { AXUIElementCopyAttributeValue(focused_window, title_attribute, &mut title_value) };
     unsafe { CFRelease(title_attribute) };
     unsafe { CFRelease(focused_window) };
     if title_result != 0 || title_value.is_null() {
@@ -115,9 +118,7 @@ fn focused_window_title(process_id: i32) -> Option<String> {
 
 fn cf_string(value: &str) -> Option<CfRef> {
     let value = std::ffi::CString::new(value).ok()?;
-    let string = unsafe {
-        CFStringCreateWithCString(ptr::null(), value.as_ptr(), UTF8_ENCODING)
-    };
+    let string = unsafe { CFStringCreateWithCString(ptr::null(), value.as_ptr(), UTF8_ENCODING) };
     (!string.is_null()).then_some(string)
 }
 
@@ -139,5 +140,9 @@ fn cf_string_to_string(value: CfRef) -> Option<String> {
     if success == 0 {
         return None;
     }
-    Some(unsafe { CStr::from_ptr(buffer.as_ptr().cast()) }.to_string_lossy().into_owned())
+    Some(
+        unsafe { CStr::from_ptr(buffer.as_ptr().cast()) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }

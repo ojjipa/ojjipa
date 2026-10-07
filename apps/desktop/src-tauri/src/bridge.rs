@@ -6,7 +6,10 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 use tokio::net::TcpListener;
@@ -16,7 +19,6 @@ use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const PROTOCOL_VERSION: u8 = 1;
 
 pub type PendingRequests = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
@@ -24,6 +26,7 @@ pub type PendingRequests = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Valu
 pub struct DumpRequest {
     pub request_id: String,
     pub content: String,
+    pub max_thinking_seconds: u64,
 }
 
 #[derive(Deserialize)]
@@ -52,8 +55,10 @@ struct DumpSubmitMessage<'a> {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DumpPayload<'a> {
     content: &'a str,
+    max_thinking_seconds: u64,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +76,7 @@ pub async fn run(
     mut dump_rx: mpsc::Receiver<DumpRequest>,
     pending_requests: PendingRequests,
     database_path: PathBuf,
+    activity_paused: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -121,6 +127,9 @@ pub async fn run(
         tokio::select! {
             activity = activity_rx.recv() => {
                 let Some(activity) = activity else { break };
+                if activity_paused.load(Ordering::Acquire) {
+                    continue;
+                }
                 let message = ActivityMessage {
                     protocol_version: PROTOCOL_VERSION,
                     message_type: "activity",
@@ -137,7 +146,10 @@ pub async fn run(
                     protocol_version: PROTOCOL_VERSION,
                     message_type: "dump.submit",
                     request_id: &dump.request_id,
-                    payload: DumpPayload { content: &dump.content },
+                    payload: DumpPayload {
+                        content: &dump.content,
+                        max_thinking_seconds: dump.max_thinking_seconds,
+                    },
                 };
                 let json = serde_json::to_string(&message)
                     .map_err(|error| format!("Could not encode dump submission: {error}"))?;
@@ -213,7 +225,10 @@ fn launch_engine(port: u16, token: &str, database_path: &std::path::Path) -> Res
                 .join("../../../engine/python/bridge.py")
         });
     if !script.is_file() {
-        return Err(format!("Python engine script was not found at {}", script.display()));
+        return Err(format!(
+            "Python engine script was not found at {}",
+            script.display()
+        ));
     }
 
     let python = std::env::var_os("OJJIPA_PYTHON").unwrap_or_else(|| {
@@ -228,6 +243,7 @@ fn launch_engine(port: u16, token: &str, database_path: &std::path::Path) -> Res
         .env("OJJIPA_BRIDGE_URL", format!("ws://127.0.0.1:{port}"))
         .env("OJJIPA_BRIDGE_TOKEN", token)
         .env("OJJIPA_DATABASE_PATH", database_path)
+        .envs(crate::engine_model_environment(database_path))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

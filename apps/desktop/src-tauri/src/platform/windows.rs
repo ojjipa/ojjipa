@@ -8,8 +8,7 @@ use std::path::Path;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
@@ -29,8 +28,8 @@ pub(super) fn active_window() -> Result<Option<ActiveWindow>, String> {
 
     let mut title_buffer = [0_u16; 2048];
     let title_len = unsafe { GetWindowTextW(hwnd, &mut title_buffer) };
-    let title = (title_len > 0)
-        .then(|| String::from_utf16_lossy(&title_buffer[..title_len as usize]));
+    let title =
+        (title_len > 0).then(|| String::from_utf16_lossy(&title_buffer[..title_len as usize]));
 
     Ok(Some(ActiveWindow {
         title,
@@ -42,9 +41,8 @@ pub(super) fn active_window() -> Result<Option<ActiveWindow>, String> {
 }
 
 fn process_image_path(process_id: u32) -> Option<String> {
-    let process = unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?
-    };
+    let process =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()? };
 
     let mut path_buffer = [0_u16; 32_768];
     let mut path_len = path_buffer.len() as u32;
