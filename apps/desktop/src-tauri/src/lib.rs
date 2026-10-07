@@ -4,10 +4,13 @@ mod platform;
 use serde_json::{json, Value};
 use std::{
     fs,
+    sync::{Arc, Mutex},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 use tauri::{Manager, State};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
@@ -16,6 +19,92 @@ struct BridgeState {
     dump_tx: mpsc::Sender<bridge::DumpRequest>,
     pending_requests: bridge::PendingRequests,
     next_request_id: AtomicU64,
+    engine_error: Arc<Mutex<Option<String>>>,
+}
+
+const DEFAULT_SHORTCUT: &str = "CommandOrControl+Alt+Shift+Space";
+
+fn load_preferences(app: &tauri::AppHandle) -> Result<Value, String> {
+    let path = app.path().app_data_dir().map_err(|e| e.to_string())?.join("ui-preferences.json");
+    if !path.exists() { return Ok(json!({})); }
+    serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+fn save_preference(app: &tauri::AppHandle, key: &str, value: Value) -> Result<(), String> {
+    let mut preferences = load_preferences(app)?;
+    preferences[key] = value;
+    let directory = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    fs::write(directory.join("ui-preferences.json"), serde_json::to_vec_pretty(&preferences).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_capture_shortcut(app: tauri::AppHandle) -> Result<String, String> {
+    Ok(load_preferences(&app)?["captureShortcut"].as_str().unwrap_or(DEFAULT_SHORTCUT).to_owned())
+}
+
+fn register_capture(app: &tauri::AppHandle, shortcut: &str) -> Result<(), String> {
+    app.global_shortcut().on_shortcut(shortcut, |app, _, event| {
+        if event.state == ShortcutState::Pressed {
+            if let Some(window) = app.get_webview_window("capture") {
+                let _ = window.show(); let _ = window.set_focus();
+            }
+        }
+    }).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_capture_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<String, String> {
+    if !shortcut.contains("Control") && !shortcut.contains("Command") && !shortcut.contains("Alt") && !shortcut.contains("Shift") {
+        return Err("Include a modifier key".into());
+    }
+    let previous = get_capture_shortcut(app.clone())?;
+    if previous == shortcut { return Ok(shortcut); }
+    register_capture(&app, &shortcut)?;
+    if let Err(error) = save_preference(&app, "captureShortcut", json!(shortcut)) {
+        let _ = app.global_shortcut().unregister(shortcut.as_str()); return Err(error);
+    }
+    let _ = app.global_shortcut().unregister(previous.as_str());
+    Ok(shortcut)
+}
+
+#[tauri::command]
+fn hide_capture_window(app: tauri::AppHandle) -> Result<(), String> {
+    app.get_webview_window("capture").ok_or("Capture window unavailable")?.hide().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_notification_preferences(app: tauri::AppHandle) -> Result<Value, String> {
+    let stored = load_preferences(&app)?;
+    Ok(stored.get("notifications").cloned().unwrap_or(json!({"enabled":true,"taskCompletions":true,"reminders":true,"resurfacedItems":true,"problems":true,"updates":true})))
+}
+
+#[tauri::command]
+fn save_notification_preferences(app: tauri::AppHandle, preferences: Value) -> Result<Value, String> {
+    let keys = ["enabled","taskCompletions","reminders","resurfacedItems","problems","updates"];
+    let object = preferences.as_object().ok_or("Invalid notification settings")?;
+    if object.len() != keys.len() || keys.iter().any(|key| !preferences[*key].is_boolean()) {
+        return Err("Invalid notification settings".into());
+    }
+    save_preference(&app, "notifications", preferences.clone())?;
+    Ok(preferences)
+}
+
+#[tauri::command]
+fn test_desktop_notification(app: tauri::AppHandle) -> Result<(), String> {
+    if get_notification_preferences(app.clone())?["enabled"] != true {
+        return Err("Enable desktop notifications first".into());
+    }
+    app.notification().builder().title("OJJIPA").body("Your desktop notifications are connected.").show().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn workspace_request(state: State<'_, BridgeState>, operation: String, payload: Value) -> Result<Value, String> {
+    if !["workspace.get", "minipa.status"].contains(&operation.as_str()) || !payload.is_object() {
+        return Err("Unsupported workspace request".into());
+    }
+    send_engine_request(&state, operation, payload).await
 }
 
 /// Tauri commands to get the active window transparency and agent activity
@@ -42,12 +131,20 @@ async fn get_agent_activity(
 
 /// Persist a user-created dump through the Python engine and return its result.
 #[tauri::command]
-async fn submit_dump(state: State<'_, BridgeState>, content: String) -> Result<Value, String> {
+async fn submit_dump(app: tauri::AppHandle, state: State<'_, BridgeState>, content: String) -> Result<Value, String> {
     if content.trim().is_empty() {
         return Err("Dump content cannot be empty".to_owned());
     }
 
-    send_engine_request(&state, "dump.submit".into(), json!({"content": content})).await
+    let result = send_engine_request(&state, "dump.submit".into(), json!({"content": content})).await;
+    if let Ok(preferences) = get_notification_preferences(app.clone()) {
+        let category = if result.is_ok() { "updates" } else { "problems" };
+        if preferences["enabled"] == true && preferences[category] == true {
+            let body = if result.is_ok() { "Your thought was saved to your private inbox." } else { "Your thought could not be saved. Open OJJIPA to try again." };
+            let _ = app.notification().builder().title("OJJIPA").body(body).show();
+        }
+    }
+    result
 }
 
 struct PendingGuard {
@@ -74,6 +171,9 @@ async fn hold_queue_request(state: State<'_, BridgeState>, operation: String, pa
 }
 
 async fn send_engine_request(state: &BridgeState, operation: String, payload: Value) -> Result<Value, String> {
+    if let Some(error) = state.engine_error.lock().map_err(|_| "Engine status unavailable")?.as_ref() {
+        return Err(format!("Engine unavailable: {error}. Restart OJJIPA after correcting the problem."));
+    }
 
     let request_id = format!(
         "dump-{}",
@@ -101,7 +201,9 @@ async fn send_engine_request(state: &BridgeState, operation: String, payload: Va
         if let Ok(mut requests) = state.pending_requests.lock() {
             requests.remove(&request_id);
         }
-        return Err(format!("Could not queue request for the engine: {error}"));
+        let reason = state.engine_error.lock().ok().and_then(|value| value.clone())
+            .unwrap_or_else(|| error.to_string());
+        return Err(format!("Engine unavailable: {reason}. Restart OJJIPA after correcting the problem."));
     }
 
     reply_rx.await.map_err(|_| "The engine closed the response channel".to_owned())?
@@ -113,29 +215,64 @@ pub fn run() {
     let (activity_tx, activity_rx) = mpsc::channel(32);
     let (dump_tx, dump_rx) = mpsc::channel(32);
     let pending_requests: bridge::PendingRequests = Default::default();
+    let engine_error: Arc<Mutex<Option<String>>> = Default::default();
+    let task_engine_error = engine_error.clone();
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open-workspace" => { if let Some(window) = app.get_webview_window("main") { let _ = window.show(); let _ = window.set_focus(); } },
+            "quick-capture" => { if let Some(window) = app.get_webview_window("capture") { let _ = window.show(); let _ = window.set_focus(); } },
+            "quit-ojjipa" => app.exit(0),
+            _ => {},
+        })
         .manage(BridgeState {
             activity_tx: activity_tx.clone(),
             dump_tx: dump_tx.clone(),
             pending_requests: pending_requests.clone(),
             next_request_id: AtomicU64::new(1),
+            engine_error,
         })
         .setup(move |app| {
             let app_data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
+            tauri::WebviewWindowBuilder::new(app, "capture", tauri::WebviewUrl::App("index.html".into()))
+                .title("OJJIPA Quick Capture").inner_size(640.0, 210.0)
+                .decorations(false).always_on_top(true).visible(false).build()?;
+            let shortcut = get_capture_shortcut(app.handle().clone()).unwrap_or(DEFAULT_SHORTCUT.to_owned());
+            if let Err(error) = register_capture(app.handle(), &shortcut) { eprintln!("Capture shortcut unavailable: {error}"); }
+            let menu = tauri::menu::Menu::with_items(app, &[
+                &tauri::menu::MenuItem::with_id(app, "open-workspace", "Open OJJIPA", true, None::<&str>)?,
+                &tauri::menu::MenuItem::with_id(app, "quick-capture", "Quick capture", true, None::<&str>)?,
+                &tauri::menu::MenuItem::with_id(app, "quit-ojjipa", "Quit OJJIPA", true, None::<&str>)?,
+            ])?;
+            if let Some(tray) = app.tray_by_id("main") { tray.set_menu(Some(menu))?; }
             let database_path = app_data_dir.join("ojjipa.sqlite");
 
             let pending_requests = pending_requests.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = bridge::run(
+                let result = bridge::run(
                     activity_rx,
                     dump_rx,
-                    pending_requests,
+                    pending_requests.clone(),
                     database_path,
                 )
-                .await
-                {
-                    eprintln!("OJJIPA engine bridge stopped: {error}");
+                .await;
+                let error = result.err().unwrap_or_else(|| "The Python engine disconnected".to_owned());
+                eprintln!("OJJIPA engine bridge stopped: {error}");
+                if let Ok(mut status) = task_engine_error.lock() {
+                    *status = Some(error.clone());
+                }
+                if let Ok(mut requests) = pending_requests.lock() {
+                    for (_, sender) in requests.drain() {
+                        let _ = sender.send(Err(format!("Engine unavailable: {error}")));
+                    }
                 }
             });
 
@@ -167,7 +304,14 @@ pub fn run() {
             get_active_window_transparency,
             get_agent_activity,
             submit_dump,
-            hold_queue_request
+            hold_queue_request,
+            workspace_request,
+            get_capture_shortcut,
+            save_capture_shortcut,
+            hide_capture_window,
+            get_notification_preferences,
+            save_notification_preferences,
+            test_desktop_notification
         ])
         .run(tauri::generate_context!())
         .expect("error running OJJIPA");

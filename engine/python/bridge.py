@@ -34,7 +34,7 @@ async def run() -> None:
     ticker = None
     try:
         recover_activity(database)
-        async with websockets.connect(url, max_size=64 * 1024) as socket:
+        async with websockets.connect(url, max_size=2 * 1024 * 1024) as socket:
             await socket.send(
                 json.dumps(
                     {
@@ -117,9 +117,27 @@ def handle_message(database: ControlDatabase, message: dict, attention=None) -> 
         dump = save_dump(database, payload["content"])
         return {
             "dumpId": dump.id,
+            "decisionStatus": "pending",
             "content": dump.content,
             "createdAt": dump.created_at,
         }
+
+    if message_type == 'workspace.get':
+        if payload:
+            raise ValueError('workspace.get takes no arguments')
+        from repos.workspace import WorkspaceRepository
+        return WorkspaceRepository(database).snapshot()
+
+    if message_type == 'minipa.status':
+        if set(payload) != {'id', 'status'} or type(payload['id']) is not int or payload['id'] < 1:
+            raise ValueError('A positive MiniPa ID and status are required')
+        from repos.types import MinipaStatus
+        from services import update_minipa_status
+        from dataclasses import asdict
+        item = update_minipa_status(database, payload['id'], MinipaStatus(payload['status']))
+        if item is None:
+            raise ValueError('MiniPa was not found')
+        return asdict(item)
 
     raise ValueError(f"unsupported message type: {message_type!r}")
 

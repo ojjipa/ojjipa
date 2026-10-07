@@ -227,6 +227,8 @@ fn launch_engine(port: u16, token: &str, database_path: &std::path::Path) -> Res
         .env("OJJIPA_BRIDGE_URL", format!("ws://127.0.0.1:{port}"))
         .env("OJJIPA_BRIDGE_TOKEN", token)
         .env("OJJIPA_DATABASE_PATH", database_path)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("PYTHONUTF8", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())

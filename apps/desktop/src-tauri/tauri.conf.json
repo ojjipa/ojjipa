@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "desktop",
+  "productName": "OJJIPA",
   "version": "0.1.0",
   "identifier": "com.admin.desktop",
   "build": {
@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "desktop",
-        "width": 800,
-        "height": 600,
+        "title": "OJJIPA",
+        "width": 1200,
+        "height": 800,
         "fullscreen": false,
         "decorations": true,
         "transparent": false
@@ -33,6 +33,10 @@
     "active": true,
     "targets": "all",
     "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
       "icons/icon.ico"
     ]
   }
