@@ -23,7 +23,8 @@ pub type PendingRequests = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Valu
 
 pub struct DumpRequest {
     pub request_id: String,
-    pub content: String,
+    pub message_type: String,
+    pub payload: Value,
 }
 
 #[derive(Deserialize)]
@@ -46,14 +47,9 @@ struct ActivityMessage<'a> {
 #[serde(rename_all = "camelCase")]
 struct DumpSubmitMessage<'a> {
     protocol_version: u8,
-    message_type: &'static str,
+    message_type: &'a str,
     request_id: &'a str,
-    payload: DumpPayload<'a>,
-}
-
-#[derive(Serialize)]
-struct DumpPayload<'a> {
-    content: &'a str,
+    payload: &'a Value,
 }
 
 #[derive(Deserialize)]
@@ -133,11 +129,14 @@ pub async fn run(
             }
             dump = dump_rx.recv() => {
                 let Some(dump) = dump else { break };
+                if !pending_requests.lock().map_err(|_| "Pending map unavailable")?.contains_key(&dump.request_id) {
+                    continue;
+                }
                 let message = DumpSubmitMessage {
                     protocol_version: PROTOCOL_VERSION,
-                    message_type: "dump.submit",
+                    message_type: &dump.message_type,
                     request_id: &dump.request_id,
-                    payload: DumpPayload { content: &dump.content },
+                    payload: &dump.payload,
                 };
                 let json = serde_json::to_string(&message)
                     .map_err(|error| format!("Could not encode dump submission: {error}"))?;

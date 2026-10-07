@@ -22,9 +22,9 @@ class HoldQueueRepository:
     def __init__(self, database: ControlDatabase):
         self._database = database
 
-    def create(self, report_id: int) -> HeldItem:
+    def create(self, report_id: int, expires_at: Optional[str] = None) -> HeldItem:
         cursor = self._database.connection.execute(
-            "INSERT INTO hold_queue (report_id) VALUES (?)", (report_id,)
+            "INSERT INTO hold_queue (report_id, expires_at) VALUES (?, ?)", (report_id, expires_at)
         )
         row = self._database.connection.execute(
             "SELECT id, report_id, status, created_at, expires_at, surfaced_at "
@@ -79,12 +79,12 @@ class HoldQueueRepository:
             cursor = self._database.connection.execute(
                 "UPDATE hold_queue SET status = ?, "
                 "surfaced_at = COALESCE(surfaced_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) "
-                "WHERE id = ?",
+                "WHERE id = ? AND status = 'held'",
                 (status.value, item_id),
             )
         else:
             cursor = self._database.connection.execute(
-                "UPDATE hold_queue SET status = ? WHERE id = ?",
+                "UPDATE hold_queue SET status = ? WHERE id = ? AND status = 'held'",
                 (status.value, item_id),
             )
         return cursor.rowcount > 0

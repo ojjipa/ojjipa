@@ -1,8 +1,14 @@
 """Application operations and the control database's transaction boundaries."""
 
 from typing import Optional, Tuple
-
+from datetime import datetime, timezone
+import json
+from repos.seen_items import SeenItemsRepository
+from repos.attention import AttentionRepository
+from core.attention.dedup import fingerprint
+from core.attention.policy import should_surface
 from control_database import ControlDatabase
+from core.attention.Finite_state_machine import validate_transition
 from repos import (
     ActivityRepository,
     DecisionsRepository,
@@ -25,6 +31,33 @@ from repos.types import (
     Verdict,
     HoldStatus,
 )
+
+
+def file_report_if_new(
+    db: ControlDatabase,
+    minipa_id: int,
+    source: str,
+    item_id: str,
+    content: str,
+    expires_at: Optional[str] = None,
+) -> Optional[Tuple[Report, HeldItem]]:
+    if not isinstance(source, str) or not source.strip() or not isinstance(item_id, str) or not item_id.strip():
+        raise ValueError('A stable source and item ID are required')
+    # Scope deduplication to the MiniPa so independent watches do not suppress each other.
+    scope = json.dumps([minipa_id, source], separators=(',', ':'))
+    item_key = fingerprint(scope, item_id)
+    expires_at = _normalize_expiry(expires_at)
+
+    with db.transaction():
+        is_new = SeenItemsRepository(db).record_if_new(scope, item_key)
+
+        if not is_new:
+            return None
+
+        report = ReportsRepository(db).create(minipa_id, content)
+        held_item = HoldQueueRepository(db).create(report.id, expires_at)
+
+    return report, held_item
 
 
 def intake_dump(
@@ -64,11 +97,13 @@ def file_report(
     minipa_id: int,
     content: str,
     hold: bool,
+    expires_at: Optional[str] = None,
 ) -> Tuple[Report, Optional[HeldItem]]:
     """Save a MiniPa report and optionally enqueue it, atomically."""
+    expires_at = _normalize_expiry(expires_at)
     with db.transaction():
         report = ReportsRepository(db).create(minipa_id, content)
-        held_item = HoldQueueRepository(db).create(report.id) if hold else None
+        held_item = HoldQueueRepository(db).create(report.id, expires_at) if hold else None
     return report, held_item
 
 
@@ -127,17 +162,13 @@ def update_hold_status(
 ) -> Optional[HeldItem]:
     with db.transaction():
         repository = HoldQueueRepository(db)
+        repository.expire_due()
         current = repository.get_by_id(item_id)
         if current is None:
             return None
-        if current.status != HoldStatus.HELD:
-            if current.status == status:
-                return current
-            raise ValueError(
-                f"Hold item cannot transition from {current.status.value} to {status.value}"
-            )
-        if status == HoldStatus.HELD:
+        if current.status == status:
             return current
+        validate_transition(current.status, status)
         repository.update_status(item_id, status)
         return repository.get_by_id(item_id)
 
@@ -153,6 +184,57 @@ def count_held_items(db: ControlDatabase) -> int:
 def expire_due_hold_items(db: ControlDatabase) -> int:
     with db.transaction():
         return HoldQueueRepository(db).expire_due()
+
+
+def _normalize_expiry(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            raise ValueError()
+        parsed = parsed.astimezone(timezone.utc)
+        if parsed <= datetime.now(timezone.utc):
+            raise ValueError()
+        return parsed.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError('Expiration must be a future ISO timestamp with a timezone') from None
+
+
+def surface_next_held(db: ControlDatabase, tracker, *, user_requested: bool = False) -> Optional[HeldItem]:
+    """Caller serializes tracker access; selection and transition are atomic."""
+    with db.transaction():
+        repository = HoldQueueRepository(db)
+        repository.expire_due()
+        preferences = AttentionRepository(db).preferences()
+        if not should_surface(category=tracker.category, **tracker.timings(),
+                              **preferences, user_requested=user_requested):
+            return None
+        items = repository.list_held(limit=1)
+        if not items:
+            return None
+        item = items[0]
+        validate_transition(item.status, HoldStatus.SURFACED)
+        if not repository.update_status(item.id, HoldStatus.SURFACED):
+            return None
+        result = repository.get_by_id(item.id)
+    # Only update the session timer after the transaction commits.
+    tracker.mark_surfaced()
+    return result
+
+
+def update_attention_preferences(db: ControlDatabase, changes: dict) -> dict[str, bool]:
+    if not isinstance(changes, dict) or any(
+        key not in ('focus_enabled', 'auto_surface_enabled') or type(value) is not bool
+        for key, value in changes.items()
+    ):
+        raise ValueError('Attention preferences must be booleans')
+    with db.transaction():
+        repository = AttentionRepository(db)
+        preferences = repository.preferences()
+        preferences.update(changes)
+        repository.update_preferences(**preferences)
+        return preferences
 
 
 def record_grandpa_action(

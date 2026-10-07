@@ -5,6 +5,8 @@ from .grandpa_actions import GrandpaActionsRepository
 from .hold_queue import HoldQueueRepository
 from .minipa import MiniPaRepository
 from .reports import ReportsRepository
+from .seen_items import SeenItemsRepository
+from .attention import AttentionRepository
 from .types import (
     DecisionRecord,
     Dump,
@@ -21,6 +23,8 @@ from .types import (
 )
 
 __all__ = [
+    "AttentionRepository",
+    "SeenItemsRepository",
     "ActivityRepository",
     "DecisionRecord",
     "DecisionsRepository",

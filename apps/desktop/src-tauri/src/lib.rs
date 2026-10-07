@@ -1,7 +1,7 @@
 mod bridge;
 mod platform;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     fs,
     sync::atomic::{AtomicU64, Ordering},
@@ -47,6 +47,34 @@ async fn submit_dump(state: State<'_, BridgeState>, content: String) -> Result<V
         return Err("Dump content cannot be empty".to_owned());
     }
 
+    send_engine_request(&state, "dump.submit".into(), json!({"content": content})).await
+}
+
+struct PendingGuard {
+    id: String,
+    pending: bridge::PendingRequests,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut requests) = self.pending.lock() {
+            requests.remove(&self.id);
+        }
+    }
+}
+
+/// Attention controls use the same correlated request/reply transport as dumps.
+#[tauri::command]
+async fn hold_queue_request(state: State<'_, BridgeState>, operation: String, payload: Value) -> Result<Value, String> {
+    if !["attention.get", "attention.settings", "attention.surface", "attention.dismiss"].contains(&operation.as_str()) {
+        return Err("Unsupported attention operation".into());
+    }
+    if !payload.is_object() { return Err("Payload must be an object".into()); }
+    send_engine_request(&state, operation, payload).await
+}
+
+async fn send_engine_request(state: &BridgeState, operation: String, payload: Value) -> Result<Value, String> {
+
     let request_id = format!(
         "dump-{}",
         state.next_request_id.fetch_add(1, Ordering::Relaxed)
@@ -58,31 +86,26 @@ async fn submit_dump(state: State<'_, BridgeState>, content: String) -> Result<V
         .map_err(|_| "Pending request map is unavailable".to_owned())?
         .insert(request_id.clone(), reply_tx);
 
+    let _guard = PendingGuard { id: request_id.clone(), pending: state.pending_requests.clone() };
+
+    timeout(bridge::REQUEST_TIMEOUT, async {
     if let Err(error) = state
         .dump_tx
         .send(bridge::DumpRequest {
             request_id: request_id.clone(),
-            content,
+            message_type: operation,
+            payload,
         })
         .await
     {
         if let Ok(mut requests) = state.pending_requests.lock() {
             requests.remove(&request_id);
         }
-        return Err(format!("Could not queue dump for the engine: {error}"));
+        return Err(format!("Could not queue request for the engine: {error}"));
     }
 
-    match timeout(bridge::REQUEST_TIMEOUT, reply_rx).await {
-        Ok(Ok(Ok(result))) => Ok(result),
-        Ok(Ok(Err(error))) => Err(error),
-        Ok(Err(_)) => Err("The engine closed the dump response channel".to_owned()),
-        Err(_) => {
-            if let Ok(mut requests) = state.pending_requests.lock() {
-                requests.remove(&request_id);
-            }
-            Err("Timed out waiting for the Python engine to save the dump".to_owned())
-        }
-    }
+    reply_rx.await.map_err(|_| "The engine closed the response channel".to_owned())?
+    }).await.map_err(|_| "Timed out waiting for the Python engine".to_owned())?
 }
 
 //// Run the Tauri application
@@ -119,18 +142,15 @@ pub fn run() {
             let activity_tx = activity_tx.clone();
             tauri::async_runtime::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(3));
-                let mut previous_category = None;
 
                 loop {
                     interval.tick().await;
                     let category = match platform::active_window() {
                         Ok(Some(window)) => window.category(),
                         Ok(None) => platform::ActivityCategory::Unknown,
-                        Err(_) => continue,
+                        Err(_) => platform::ActivityCategory::Unknown,
                     };
 
-                    if previous_category != Some(category) {
-                        previous_category = Some(category);
                         if let Err(error) = activity_tx
                             .send(platform::AgentActivity { category })
                             .await
@@ -138,7 +158,6 @@ pub fn run() {
                             eprintln!("Could not send activity category to the engine: {error}");
                             break;
                         }
-                    }
                 }
             });
 
@@ -147,7 +166,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_active_window_transparency,
             get_agent_activity,
-            submit_dump
+            submit_dump,
+            hold_queue_request
         ])
         .run(tauri::generate_context!())
         .expect("error running OJJIPA");

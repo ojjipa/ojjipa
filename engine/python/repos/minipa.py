@@ -1,10 +1,7 @@
 import sqlite3
 from typing import List, Optional
-
 from control_database import ControlDatabase
 from .types import Minipa, MinipaKind, MinipaStatus
-
-
 def _to_minipa(row: sqlite3.Row) -> Minipa:
     return Minipa(
         id=row["id"],
@@ -18,7 +15,6 @@ def _to_minipa(row: sqlite3.Row) -> Minipa:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
-
 
 class MiniPaRepository:
     """Create MiniPas and read or change their lifecycle status."""
