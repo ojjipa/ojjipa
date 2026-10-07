@@ -3,16 +3,12 @@ import json
 import sys
 import os
 import logging
-from dataclasses import asdict
 from pathlib import Path
 import websockets
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from control_database import ControlDatabase
 from services import close_activity, recover_activity, record_activity, save_dump
 from attention import AttentionController
-from repos import DumpsRepository, MiniPaRepository
-from repos.types import MinipaStatus
-from services import update_minipa_status
 
 PROTOCOL_VERSION = 1
 ALLOWED_CATEGORIES = {"coding", "meeting", "messaging", "reading", "unknown"}
@@ -114,22 +110,6 @@ def handle_message(database: ControlDatabase, message: dict, attention=None) -> 
         if attention is None:
             raise RuntimeError('Attention controller is unavailable')
         return attention.dispatch(message_type, payload)
-
-    if message_type == 'workspace.get':
-        if payload or attention is None:
-            raise ValueError('workspace.get takes no arguments and requires attention')
-        state = attention.dispatch('attention.get', {})
-        state['minipas'] = [asdict(agent) for agent in MiniPaRepository(database).list_recent()]
-        state['dumps'] = [asdict(dump) for dump in DumpsRepository(database).list_recent(10)]
-        return state
-
-    if message_type == 'minipa.update':
-        if set(payload) != {'id', 'status'} or type(payload['id']) is not int or payload['id'] < 1:
-            raise ValueError('A MiniPa ID and status are required')
-        agent = update_minipa_status(database, payload['id'], MinipaStatus(payload['status']))
-        if agent is None:
-            raise ValueError('MiniPa not found')
-        return asdict(agent)
 
     if message_type == "dump.submit":
         if set(payload) != {"content"} or not isinstance(payload.get("content"), str):

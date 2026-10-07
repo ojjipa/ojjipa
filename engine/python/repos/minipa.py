@@ -1,10 +1,7 @@
 import sqlite3
 from typing import List, Optional
-
 from control_database import ControlDatabase
 from .types import Minipa, MinipaKind, MinipaStatus
-
-
 def _to_minipa(row: sqlite3.Row) -> Minipa:
     return Minipa(
         id=row["id"],
@@ -18,7 +15,6 @@ def _to_minipa(row: sqlite3.Row) -> Minipa:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
-
 
 class MiniPaRepository:
     """Create MiniPas and read or change their lifecycle status."""
@@ -58,14 +54,6 @@ class MiniPaRepository:
             "SELECT id, kind, purpose, source, termination_condition, scope, config, "
             "status, created_at, updated_at FROM minipa "
             "WHERE status = 'active' ORDER BY created_at DESC, id DESC"
-        ).fetchall()
-        return [_to_minipa(row) for row in rows]
-
-    def list_recent(self, limit: int = 100) -> List[Minipa]:
-        if not 1 <= limit <= 100:
-            raise ValueError('Limit must be between 1 and 100')
-        rows = self._database.connection.execute(
-            'SELECT * FROM minipa ORDER BY created_at DESC, id DESC LIMIT ?', (limit,)
         ).fetchall()
         return [_to_minipa(row) for row in rows]
 
