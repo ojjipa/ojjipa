@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "OJJIPA — Use this tab",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "description": "Connect one existing Chrome tab to OJJIPA's real Hermes workers.",
+  "permissions": ["debugger", "storage", "activeTab", "alarms"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "popup.html"},
+  "commands": {"_execute_action": {"suggested_key": {"default": "Ctrl+Shift+Y"}}}
+}

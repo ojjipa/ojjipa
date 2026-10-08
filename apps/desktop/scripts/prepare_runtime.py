@@ -66,6 +66,7 @@ def main():
     copy_tree(PACKAGES, python / 'Lib/site-packages')
     app = STAGING / 'app'
     copy_tree(ROOT / 'engine/python', app / 'engine/python')
+    copy_tree(ROOT / 'apps/chrome-extension', app / 'apps/chrome-extension')
     copy_tree(ROOT / 'core', app / 'core', lambda d, names: ignored(d, names) +
               (['vendors'] if Path(d) == ROOT / 'core' else []))
     # Preserve runtime code/resources. The documentation website is not executed
