@@ -14,6 +14,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tauri_plugin_notification::NotificationExt;
+use tauri::Manager;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -67,6 +69,7 @@ pub async fn run(
     mut dump_rx: mpsc::Receiver<DumpRequest>,
     pending_requests: PendingRequests,
     database_path: PathBuf,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -75,7 +78,7 @@ pub async fn run(
         .local_addr()
         .map_err(|error| format!("Could not read the local engine socket address: {error}"))?;
     let token = create_token()?;
-    let mut child = launch_engine(address.port(), &token, &database_path)?;
+    let mut child = launch_engine(&app, address.port(), &token, &database_path)?;
 
     let (stream, _) = tokio::select! {
         accepted = listener.accept() => accepted
@@ -152,6 +155,19 @@ pub async fn run(
                     }
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<EngineResponse>(&text) {
+                            Ok(response) if response.message_type == "engine.event" && response.protocol_version == PROTOCOL_VERSION => {
+                                if let Some(event) = response.result {
+                                    let category = event["category"].as_str().unwrap_or("problems");
+                                    if let Ok(preferences) = super::get_notification_preferences(app.clone()) {
+                                        if preferences["enabled"] == true && preferences[category] == true {
+                                            if let Some(message) = event["message"].as_str() {
+                                                let preview = super::notification::preview(message);
+                                                let _ = app.notification().builder().title("OJJIPA").body(preview).show();
+                                            }
+                                        }
+                                    }
+                                }
+                            },
                             Ok(response) => complete_request(&pending_requests, response),
                             Err(error) => eprintln!("Ignoring invalid engine response: {error}"),
                         }
@@ -204,25 +220,44 @@ fn complete_request(pending_requests: &PendingRequests, response: EngineResponse
     }
 }
 
-fn launch_engine(port: u16, token: &str, database_path: &std::path::Path) -> Result<Child, String> {
-    let script = std::env::var_os("OJJIPA_ENGINE_SCRIPT")
+fn launch_engine(app: &tauri::AppHandle, port: u16, token: &str, database_path: &std::path::Path) -> Result<Child, String> {
+    let (script, python) = if cfg!(debug_assertions) {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let script = std::env::var_os("OJJIPA_ENGINE_SCRIPT")
         .map(Into::into)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../engine/python/bridge.py")
-        });
+        .unwrap_or_else(|| root.join("engine/python/bridge.py"));
+        let prepared = root.join(if cfg!(target_os = "windows") { ".venv-hermes/Scripts/python.exe" } else { ".venv-hermes/bin/python" });
+        let python = std::env::var_os("OJJIPA_PYTHON").map(PathBuf::from)
+            .unwrap_or_else(|| if prepared.is_file() { prepared } else {
+                PathBuf::from(if cfg!(target_os = "windows") { "python" } else { "python3" })
+            });
+        (script, python)
+    } else {
+        let runtime = app.path().resource_dir().map_err(|e| e.to_string())?.join("runtime");
+        let python = runtime.join("python/python.exe");
+        if !python.is_file() {
+            return Err("The bundled Python runtime is missing. Repair or reinstall OJJIPA.".into());
+        }
+        (runtime.join("app/engine/python/bridge.py"), python)
+    };
     if !script.is_file() {
         return Err(format!("Python engine script was not found at {}", script.display()));
     }
 
-    let python = std::env::var_os("OJJIPA_PYTHON").unwrap_or_else(|| {
-        if cfg!(target_os = "windows") {
-            "python".into()
-        } else {
-            "python3".into()
-        }
-    });
-    Command::new(python)
+    let mut command = Command::new(&python);
+    // Installed builds use their own Python for both engine and Hermes workers.
+    // Ignore machine-global interpreter paths that could redirect this runtime.
+    if !cfg!(debug_assertions) {
+        command.env("OJJIPA_HERMES_PYTHON", &python)
+            .env("PYTHONNOUSERSITE", "1")
+            .env_remove("PYTHONHOME").env_remove("PYTHONPATH").env_remove("VIRTUAL_ENV");
+        let mut paths = vec![python.parent().ok_or("Invalid bundled Python path")?.to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") { paths.extend(std::env::split_paths(&existing)); }
+        command.env("PATH", std::env::join_paths(paths).map_err(|e| e.to_string())?);
+    }
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    command
         .arg(script)
         .env("OJJIPA_BRIDGE_URL", format!("ws://127.0.0.1:{port}"))
         .env("OJJIPA_BRIDGE_TOKEN", token)

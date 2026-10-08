@@ -1,0 +1,10 @@
+.reader-shell{height:100vh;overflow:hidden;background:#faf8ef;color:#33392f;font-family:system-ui,sans-serif;font-size:13px}
+.reader-toolbar{position:absolute;inset:0 0 auto;height:72px;box-sizing:border-box;display:flex;align-items:center;gap:6px;padding:12px;border-bottom:1px solid #d8d5c6;background:#faf8ef}
+.reader-shell button{border:1px solid #d8d5c6;border-radius:7px;background:#fffdf7;color:inherit;padding:8px;cursor:pointer;white-space:nowrap}
+.reader-shell button:disabled{opacity:.5;cursor:wait}.reader-shell button[aria-pressed=true]{background:#e1e7d6}
+.reader-toolbar form{flex:1;min-width:0}.reader-toolbar input{width:100%;box-sizing:border-box;border:1px solid #d8d5c6;border-radius:7px;padding:9px;background:white;color:inherit}
+.reader-page-region{position:absolute;top:72px;bottom:210px;left:0;right:0;background:white}
+.reader-question-panel{position:absolute;bottom:0;left:0;right:0;height:210px;box-sizing:border-box;padding:12px 16px;border-top:1px solid #d8d5c6;background:#faf8ef}
+.reader-context-row{display:flex;align-items:center;gap:8px;height:36px}.reader-context-row>span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.reader-context-row button{font-size:11px;padding:6px}.reader-question{display:flex;gap:8px;margin-top:8px}.reader-question textarea{flex:1;min-width:0;resize:none;height:70px;border:1px solid #d8d5c6;border-radius:8px;padding:10px;background:white;color:inherit;font:inherit;box-sizing:border-box}.reader-question button{background:#b54d39;color:white;border:none;font-size:12px}
+.reader-feedback{margin:9px 0 0;font-size:11px;line-height:1.4;max-height:48px;overflow:auto}.reader-error{color:#a92c24}

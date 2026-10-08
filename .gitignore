@@ -1,0 +1,4 @@
+.venv-hermes/
+.runtime-check/
+apps/desktop/src-tauri/resources/runtime/
+apps/desktop/src-tauri/resources/.runtime-staging/

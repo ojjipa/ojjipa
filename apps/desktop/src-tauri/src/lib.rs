@@ -1,5 +1,7 @@
 mod bridge;
 mod platform;
+mod reader;
+mod notification;
 
 use serde_json::{json, Value};
 use std::{
@@ -101,7 +103,7 @@ fn test_desktop_notification(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn workspace_request(state: State<'_, BridgeState>, operation: String, payload: Value) -> Result<Value, String> {
-    if !["workspace.get", "minipa.status"].contains(&operation.as_str()) || !payload.is_object() {
+    if !["workspace.get", "minipa.status", "ai.settings.get", "ai.settings.save", "ai.check", "ai.retry", "ai.memory.forget", "ai.analyze", "ai.run"].contains(&operation.as_str()) || !payload.is_object() {
         return Err("Unsupported workspace request".into());
     }
     send_engine_request(&state, operation, payload).await
@@ -171,6 +173,7 @@ async fn hold_queue_request(state: State<'_, BridgeState>, operation: String, pa
 }
 
 async fn send_engine_request(state: &BridgeState, operation: String, payload: Value) -> Result<Value, String> {
+    let request_timeout = if operation == "ai.check" { Duration::from_secs(130) } else { bridge::REQUEST_TIMEOUT };
     if let Some(error) = state.engine_error.lock().map_err(|_| "Engine status unavailable")?.as_ref() {
         return Err(format!("Engine unavailable: {error}. Restart OJJIPA after correcting the problem."));
     }
@@ -188,7 +191,7 @@ async fn send_engine_request(state: &BridgeState, operation: String, payload: Va
 
     let _guard = PendingGuard { id: request_id.clone(), pending: state.pending_requests.clone() };
 
-    timeout(bridge::REQUEST_TIMEOUT, async {
+    timeout(request_timeout, async {
     if let Err(error) = state
         .dump_tx
         .send(bridge::DumpRequest {
@@ -221,6 +224,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
+            reader::window_event(window, event);
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -229,6 +233,7 @@ pub fn run() {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open-workspace" => { if let Some(window) = app.get_webview_window("main") { let _ = window.show(); let _ = window.set_focus(); } },
             "quick-capture" => { if let Some(window) = app.get_webview_window("capture") { let _ = window.show(); let _ = window.set_focus(); } },
+            "open-reader" => { let app = app.clone(); tauri::async_runtime::spawn(async move { if let Err(error) = reader::reader_open(app,None).await { eprintln!("Reader unavailable: {error}"); } }); },
             "quit-ojjipa" => app.exit(0),
             _ => {},
         })
@@ -239,6 +244,7 @@ pub fn run() {
             next_request_id: AtomicU64::new(1),
             engine_error,
         })
+        .manage(reader::ReaderState::default())
         .setup(move |app| {
             let app_data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
@@ -250,18 +256,21 @@ pub fn run() {
             let menu = tauri::menu::Menu::with_items(app, &[
                 &tauri::menu::MenuItem::with_id(app, "open-workspace", "Open OJJIPA", true, None::<&str>)?,
                 &tauri::menu::MenuItem::with_id(app, "quick-capture", "Quick capture", true, None::<&str>)?,
+                &tauri::menu::MenuItem::with_id(app, "open-reader", "Open reader", true, None::<&str>)?,
                 &tauri::menu::MenuItem::with_id(app, "quit-ojjipa", "Quit OJJIPA", true, None::<&str>)?,
             ])?;
             if let Some(tray) = app.tray_by_id("main") { tray.set_menu(Some(menu))?; }
             let database_path = app_data_dir.join("ojjipa.sqlite");
 
             let pending_requests = pending_requests.clone();
+            let bridge_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let result = bridge::run(
                     activity_rx,
                     dump_rx,
                     pending_requests.clone(),
                     database_path,
+                    bridge_app,
                 )
                 .await;
                 let error = result.err().unwrap_or_else(|| "The Python engine disconnected".to_owned());
@@ -300,7 +309,22 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke| {
+            // Remote reader pages cannot call app commands, even if they attempt
+            // to construct Tauri IPC manually. Only our local UI may invoke them.
+            let view = invoke.message.webview_ref();
+            let trusted_label = ["main","capture","reader-controls"].contains(&view.label());
+            let trusted_origin = view.url().map(|url| {
+                url.scheme() == "tauri" ||
+                (matches!(url.scheme(),"http"|"https") && url.host_str() == Some("tauri.localhost")) ||
+                (cfg!(debug_assertions) && url.scheme() == "http" &&
+                 matches!(url.host_str(),Some("localhost"|"127.0.0.1")) && url.port() == Some(1420))
+            }).unwrap_or(false);
+            if !trusted_label || !trusted_origin {
+                invoke.resolver.reject("External pages cannot invoke OJJIPA commands");
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             get_active_window_transparency,
             get_agent_activity,
             submit_dump,
@@ -311,8 +335,16 @@ pub fn run() {
             hide_capture_window,
             get_notification_preferences,
             save_notification_preferences,
-            test_desktop_notification
-        ])
+            test_desktop_notification,
+            reader::reader_open,
+            reader::reader_get,
+            reader::reader_navigate,
+            reader::reader_hide,
+            reader::reader_pin,
+            reader::reader_selection
+        ];
+            handler(invoke)
+        })
         .run(tauri::generate_context!())
         .expect("error running OJJIPA");
 }

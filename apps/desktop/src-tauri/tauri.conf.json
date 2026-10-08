@@ -4,9 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.admin.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "additionalWatchFolders": ["../../../engine/python", "../../../core/grandpa", "../../../core/minipa", "../../../core/hermes"],
+    "beforeDevCommand": "node scripts/prepare-runtime.mjs --development && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run prepare:runtime && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -30,6 +31,7 @@
     }
   },
   "bundle": {
+    "resources": {"resources/runtime/": "runtime/"},
     "active": true,
     "targets": "all",
     "icon": [

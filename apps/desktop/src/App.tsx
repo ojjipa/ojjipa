@@ -3,6 +3,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import "./App.css";
+import ModelSettings from './components/ModelSettings';
+import ReportContent from './components/ReportContent';
+import Reader from './components/Reader';
+import DumpBox from './components/DumpBox';
 
 type ActivityCategory =
   | "coding"
@@ -109,7 +113,9 @@ const workspaceTabs: { id: WorkspaceTab; label: string; icon: "compass" | "inbox
 
 type Worker = { id: number; kind: string; purpose: string; status: "active" | "paused" | "retired"; termination_condition: string | null };
 type SavedReport = { id: number; minipa_id: number; content: string; created_at: string; hold_id: number | null; delivery: string | null };
-type WorkspaceData = { thoughts: {id: number; content: string}[]; minipas: Worker[]; reports: SavedReport[] };
+type AIJob = {id:number; dump_id:number|null; minipa_id:number|null; phase:string; status:string; error:string|null; due_at:string};
+type Memory = {id:number; content:string};
+type WorkspaceData = { thoughts: CapturedThought[]; minipas: Worker[]; reports: SavedReport[]; jobs:AIJob[]; memories:Memory[] };
 type AttentionData = { preferences: {focus_enabled: boolean; auto_surface_enabled: boolean}; held_count: number; surfaced_reports: {hold_id: number}[] };
 
 const activityLabels: Record<ActivityCategory, string> = {
@@ -299,8 +305,8 @@ function FloatingCapture() {
       </header>
       <form className="floating-capture-form" onSubmit={(event) => void saveCapture(event)}>
         <label className="sr-only" htmlFor="floating-thought-input">A thought to save</label>
-        <textarea
-          ref={inputRef}
+        <DumpBox
+          inputRef={inputRef}
           id="floating-thought-input"
           autoFocus
           rows={2}
@@ -333,6 +339,9 @@ function FloatingCapture() {
 }
 
 function App() {
+  if (isTauri() && getCurrentWindow().label === "reader") {
+    return <Reader />;
+  }
   if (isTauri() && getCurrentWindow().label === "capture") {
     return <FloatingCapture />;
   }
@@ -363,6 +372,8 @@ function WorkspaceApp() {
   const [capturedThoughts, setCapturedThoughts] = useState<CapturedThought[]>([]);
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [reports, setReports] = useState<SavedReport[]>([]);
+  const [jobs, setJobs] = useState<AIJob[]>([]);
+  const [memories, setMemories] = useState<Memory[]>([]);
   const [attentionData, setAttentionData] = useState<AttentionData | null>(null);
   const [workspaceError, setWorkspaceError] = useState("");
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("appearance");
@@ -384,6 +395,7 @@ function WorkspaceApp() {
         invoke<AttentionData>("hold_queue_request", {operation:"attention.get", payload:{}}),
       ]);
       setCapturedThoughts(data.thoughts); setWorkers(data.minipas); setReports(data.reports);
+      setJobs(data.jobs ?? []); setMemories(data.memories ?? []);
       setAttentionData(attention); setWorkspaceError("");
     } catch (error) { setWorkspaceError(String(error)); }
   }, []);
@@ -686,7 +698,7 @@ function WorkspaceApp() {
         >
           {isChoosingFiles ? <span className="small-spinner" /> : <Icon name="plus" size={16} />}
         </button>
-        <textarea
+        <DumpBox
           id="thought-input"
           value={content}
           onChange={(event) => {
@@ -755,7 +767,7 @@ function WorkspaceApp() {
           Thought saved · #{savedDumpId}
         </div>
       )}
-      <p className="composer-hint">Thoughts and attached text stay in your local database. Model classification and task execution are not connected yet.</p>
+      <p className="composer-hint">Saved locally first. Grandpa then considers your thought through your configured model; MiniPas work in the background.</p>
     </section>
   );
 
@@ -771,9 +783,11 @@ function WorkspaceApp() {
           <p>{thought.content}</p>
           {thought.decision && <p className="captured-decision">{thought.decision.reason}</p>}
           {thought.decision?.minipa && (
-            <span className="sample-stamp">{thought.decision.minipa.kind.toUpperCase()} DRAFT · NOT RUNNING</span>
+            <span className="sample-stamp">{thought.decision.minipa.kind.toUpperCase()} · MINIPA #{thought.decision.minipa.id}</span>
           )}
           {thought.analysisError && <p className="captured-error">{thought.analysisError}</p>}
+          {!thought.decision && <p className="captured-decision">{jobs.find(job=>job.dump_id===thought.id)?.status === 'running' ? 'Grandpa is considering this…' : jobs.some(job=>job.dump_id===thought.id) ? 'Queued for Grandpa' : 'Saved without a decision'}{!jobs.some(job=>job.dump_id===thought.id) && <button className="text-link" onClick={()=>void workspaceAction('ai.analyze',{id:thought.id})}>Ask Grandpa</button>}</p>}
+          {jobs.filter(job=>job.dump_id===thought.id && job.status==='failed').map(job=><p className="captured-error" key={job.id}>{job.error}<button className="text-link" onClick={()=>void workspaceAction('ai.retry',{id:job.id})}>Retry</button></p>)}
         </div>
         <span className="dump-reference">#{thought.id}</span>
       </article>
@@ -894,13 +908,13 @@ function WorkspaceApp() {
               )}
 
               {activeTab === "workers" && (
-                <section className="tab-page"><div className="page-heading-row"><div><h1>MiniPas</h1><p className="page-description">Saved MiniPa records and lifecycle controls. Execution is not connected yet.</p></div></div>
-                  <div className="content-panel worker-panel">{workers.map(worker => <article className="worker-row" key={worker.id}><div className="worker-main"><h3>{worker.purpose}</h3><p>{worker.kind} · {worker.status} · #{worker.id}</p>{worker.termination_condition && <p>{worker.termination_condition}</p>}{worker.status !== "retired" && <div className="finding-actions"><button onClick={() => void workspaceAction("minipa.status", {id:worker.id,status:worker.status === "active" ? "paused":"active"})}>{worker.status === "active" ? "Pause":"Resume"}</button><button onClick={() => void workspaceAction("minipa.status", {id:worker.id,status:"retired"})}>Retire</button></div>}</div></article>)}{!workers.length && <p className="panel-empty">No MiniPas have been created yet.</p>}</div>
+                <section className="tab-page"><div className="page-heading-row"><div><h1>MiniPas</h1><p className="page-description">Bounded tasks and periodic arXiv watchers, executed through Hermes.</p></div></div>
+                  <div className="content-panel worker-panel">{workers.map(worker => <article className="worker-row" key={worker.id}><div className="worker-main"><h3>{worker.purpose}</h3><p>{worker.kind} · {worker.status} · #{worker.id}</p>{worker.termination_condition && <p>{worker.termination_condition}</p>}{jobs.filter(job=>job.minipa_id===worker.id).map(job=><div key={job.id}><p>{job.phase} · {job.status}{job.phase==='watch' && job.status==='queued' ? ` · next check ${new Date(job.due_at).toLocaleString()}` : ''}</p>{job.error && <p className="captured-error">{job.error}</p>}{job.status==='failed' && worker.status!=='retired' && <button className="text-link" onClick={()=>void workspaceAction('ai.retry',{id:job.id})}>Retry failed execution</button>}</div>)}{worker.status==='active' && !jobs.some(job=>job.minipa_id===worker.id && ['queued','running','failed'].includes(job.status)) && <button className="text-link" onClick={()=>void workspaceAction('ai.run',{id:worker.id})}>Start execution</button>}{worker.status !== "retired" && <div className="finding-actions"><button onClick={() => void workspaceAction("minipa.status", {id:worker.id,status:worker.status === "active" ? "paused":"active"})}>{worker.status === "active" ? "Pause":"Resume"}</button><button onClick={() => void workspaceAction("minipa.status", {id:worker.id,status:"retired"})}>Retire</button></div>}</div></article>)}{!workers.length && <p className="panel-empty">No MiniPas have been created yet.</p>}</div>
                 </section>
               )}
               {activeTab === "findings" && (
                 <section className="tab-page"><div className="page-heading-row"><div><h1>Findings</h1><p className="page-description">{attentionData?.held_count ?? 0} reports waiting for your attention.</p></div><button className="text-link" disabled={!attentionData?.held_count} onClick={() => void attentionAction("attention.surface", {})}>Show next held result</button></div>
-                  <div className="finding-list findings-page-list">{reports.filter(report => report.delivery === "held").map(report => <article className="finding-card" key={`held-${report.id}`}><div className="finding-meta"><span>HELD · MINIPA #{report.minipa_id}</span></div><p>This result is waiting for a suitable moment.</p><button className="finding-open" onClick={() => void attentionAction("attention.dismiss", {id:report.hold_id})}>Dismiss held result</button></article>)}{reports.filter(report => report.delivery !== "held" && report.delivery !== "dismissed" && report.delivery !== "expired").map(report => <article className="finding-card" key={report.id}><div className="finding-meta"><span>MINIPA #{report.minipa_id}</span><span>{new Date(report.created_at).toLocaleString()}</span></div><p style={{whiteSpace:"pre-wrap"}}>{report.content}</p></article>)}{!reports.some(report => report.delivery === "surfaced" || !report.delivery) && <p className="panel-empty">No surfaced reports yet. Held results stay private until surfaced.</p>}</div>
+                  <div className="finding-list findings-page-list">{reports.filter(report => report.delivery === "held").map(report => <article className="finding-card" key={`held-${report.id}`}><div className="finding-meta"><span>HELD · MINIPA #{report.minipa_id}</span></div><p>This result is waiting for a suitable moment.</p><button className="finding-open" onClick={() => void attentionAction("attention.dismiss", {id:report.hold_id})}>Dismiss held result</button></article>)}{reports.filter(report => report.delivery !== "held" && report.delivery !== "dismissed" && report.delivery !== "expired").map(report => <article className="finding-card" key={report.id}><div className="finding-meta"><span>MINIPA #{report.minipa_id}</span><span>{new Date(report.created_at).toLocaleString()}</span></div><ReportContent content={report.content} /></article>)}{!reports.some(report => report.delivery === "surfaced" || !report.delivery) && <p className="panel-empty">No surfaced reports yet. Held results stay private until surfaced.</p>}</div>
                 </section>
               )}
 
@@ -1064,7 +1078,7 @@ function WorkspaceApp() {
                         </section>
                       )}
 
-                      {settingsCategory === "ai-models" && <section className="content-panel"><h2>Model connection</h2><p>Grandpa classification and Hermes execution are not connected to this desktop build yet. Your thoughts are saved locally.</p></section>}
+                      {settingsCategory === "ai-models" && <><ModelSettings /><section className="content-panel model-settings-panel"><h2>Grandpa remembers</h2><p>Explicit preferences and corrections retained across MiniPa lifetimes.</p>{memories.map(memory=><div className="settings-row" key={memory.id}><p>{memory.content}</p><button className="text-link" onClick={()=>void workspaceAction('ai.memory.forget',{id:memory.id})}>Forget</button></div>)}{!memories.length && <p>No durable memories yet.</p>}</section></>}
                     </div>
                   </div>
                 </section>

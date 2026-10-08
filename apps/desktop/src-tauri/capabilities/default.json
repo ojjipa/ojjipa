@@ -3,6 +3,7 @@
   "identifier": "default",
   "description": "Default capabilities for OJJIPA",
   "windows": ["main", "capture"],
+  "webviews": ["reader-controls"],
   "permissions": [
     "core:default",
     "opener:default",

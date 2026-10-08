@@ -8,17 +8,23 @@ import websockets
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from control_database import ControlDatabase
 from services import close_activity, recover_activity, record_activity, save_dump
+from services import report_response
 from attention import AttentionController
+from ai_settings import AISettings
+from core.minipa.orchestrator import Orchestrator
 
 PROTOCOL_VERSION = 1
 ALLOWED_CATEGORIES = {"coding", "meeting", "messaging", "reading", "unknown"}
 
 
-async def attention_loop(attention):
+async def attention_loop(attention, events):
     while True:
         await asyncio.sleep(1)
         try:
-            await asyncio.to_thread(attention.tick)
+            surfaced = await asyncio.to_thread(attention.tick)
+            if surfaced:
+                answer = await asyncio.to_thread(report_response, attention.database, surfaced['report_id'])
+                await events.put({'category':'resurfacedItems','message':answer})
         except Exception:
             logging.exception('Attention check failed; retrying on next tick')
 
@@ -32,6 +38,11 @@ async def run() -> None:
     )
     attention = AttentionController(database)
     ticker = None
+    settings = AISettings(database._database_path.parent)
+    orchestrator = Orchestrator(database, settings, database._database_path.parent / 'agents')
+    scheduler = None
+    checks = set()
+    event_sender = None
     try:
         recover_activity(database)
         async with websockets.connect(url, max_size=2 * 1024 * 1024) as socket:
@@ -48,7 +59,13 @@ async def run() -> None:
             if ready != {"messageType": "ready", "protocolVersion": PROTOCOL_VERSION}:
                 raise RuntimeError("Rust bridge rejected the protocol handshake")
 
-            ticker = asyncio.create_task(attention_loop(attention))
+            async def send_events():
+                while True:
+                    event = await orchestrator.events.get()
+                    await socket.send(json.dumps({'messageType':'engine.event','protocolVersion':1,'result':event}))
+            event_sender = asyncio.create_task(send_events())
+            ticker = asyncio.create_task(attention_loop(attention, orchestrator.events))
+            scheduler = asyncio.create_task(orchestrator.loop())
 
             async for raw_message in socket:
                 request_id = None
@@ -57,9 +74,25 @@ async def run() -> None:
                     if not isinstance(message, dict):
                         raise ValueError("message must be a JSON object")
                     request_id = message.get("requestId")
-                    result = await asyncio.to_thread(
-                        handle_message, database, message, attention
-                    )
+                    if message.get('messageType') == 'ai.check':
+                        if message.get('protocolVersion') != PROTOCOL_VERSION or message.get('payload') != {}:
+                            raise ValueError('ai.check takes no arguments')
+                        async def check_and_reply(check_id):
+                            try:
+                                result = await orchestrator.check_connection()
+                                response = {'messageType':'bridge.ack', 'protocolVersion':1,
+                                            'requestId':check_id, 'result':result}
+                            except Exception as error:
+                                response = {'messageType':'bridge.error', 'protocolVersion':1,
+                                            'requestId':check_id, 'error':str(error)}
+                            await socket.send(json.dumps(response))
+                        if checks:
+                            raise ValueError('A connection check is already running')
+                        task = asyncio.create_task(check_and_reply(request_id))
+                        checks.add(task)
+                        task.add_done_callback(checks.discard)
+                        continue
+                    result = await asyncio.to_thread(handle_message, database, message, attention, settings)
                     response = {
                         "messageType": "bridge.ack",
                         "protocolVersion": PROTOCOL_VERSION,
@@ -75,6 +108,15 @@ async def run() -> None:
                     }
                 await socket.send(json.dumps(response))
     finally:
+        if event_sender is not None:
+            event_sender.cancel()
+            await asyncio.gather(event_sender, return_exceptions=True)
+        for task in checks:
+            task.cancel()
+        await asyncio.gather(*checks, return_exceptions=True)
+        if scheduler is not None:
+            scheduler.cancel()
+            await asyncio.gather(scheduler, return_exceptions=True)
         if ticker is not None:
             ticker.cancel()
             await asyncio.gather(ticker, return_exceptions=True)
@@ -84,7 +126,7 @@ async def run() -> None:
         database.close()
 
 
-def handle_message(database: ControlDatabase, message: dict, attention=None) -> dict:
+def handle_message(database: ControlDatabase, message: dict, attention=None, settings=None) -> dict:
     """Handle one validated request off the asyncio event loop."""
     if message.get("protocolVersion") != PROTOCOL_VERSION:
         raise ValueError("unsupported bridge protocol version")
@@ -114,7 +156,8 @@ def handle_message(database: ControlDatabase, message: dict, attention=None) -> 
     if message_type == "dump.submit":
         if set(payload) != {"content"} or not isinstance(payload.get("content"), str):
             raise ValueError("dump.submit payload must contain only string content")
-        dump = save_dump(database, payload["content"])
+        from services import submit_ai_dump
+        dump = submit_ai_dump(database, payload["content"])
         return {
             "dumpId": dump.id,
             "decisionStatus": "pending",
@@ -138,6 +181,28 @@ def handle_message(database: ControlDatabase, message: dict, attention=None) -> 
         if item is None:
             raise ValueError('MiniPa was not found')
         return asdict(item)
+
+    if message_type in ('ai.settings.get', 'ai.settings.save'):
+        if settings is None:
+            settings = AISettings(database._database_path.parent)
+        if message_type == 'ai.settings.get':
+            if payload:
+                raise ValueError('ai.settings.get takes no arguments')
+            return settings.public()
+        return settings.save(payload)
+
+    if message_type in ('ai.retry', 'ai.memory.forget', 'ai.run'):
+        if set(payload) != {'id'} or type(payload['id']) is not int or payload['id'] < 1:
+            raise ValueError('A positive ID is required')
+        from services import retry_ai_job, forget_ai_memory, run_saved_minipa
+        operation = {'ai.retry':retry_ai_job,'ai.memory.forget':forget_ai_memory,'ai.run':run_saved_minipa}[message_type]
+        return operation(database, payload['id'])
+
+    if message_type == 'ai.analyze':
+        if set(payload) != {'id'} or type(payload['id']) is not int or payload['id'] < 1:
+            raise ValueError('A positive thought ID is required')
+        from services import analyze_saved_dump
+        return analyze_saved_dump(database, payload['id'])
 
     raise ValueError(f"unsupported message type: {message_type!r}")
 
