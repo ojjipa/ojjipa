@@ -42,6 +42,9 @@ class AIRepository:
     def forget(self, memory_id):
         self.db.connection.execute('DELETE FROM grandpa_memory WHERE id=?', (memory_id,))
 
+    def all_memories(self):
+        return [dict(row) for row in self.db.connection.execute('SELECT * FROM grandpa_memory ORDER BY id DESC')]
+
     def has_execution(self, minipa_id):
         return self.db.connection.execute("SELECT 1 FROM ai_jobs WHERE minipa_id=? AND phase IN ('work','watch') AND status IN ('queued','running','failed')", (minipa_id,)).fetchone() is not None
 

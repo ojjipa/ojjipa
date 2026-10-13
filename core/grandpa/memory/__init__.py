@@ -1,5 +1,49 @@
 """Grandpa's durable context policy; persistence stays in control-plane repos."""
 from pathlib import Path
+import os
+import tempfile
+
+
+def sync_memory(records, app_data_directory):
+    """Rebuild the managed section from committed memories, preserving user notes."""
+    path = initialize_memory(app_data_directory) / 'memory.md'
+    start, end = '<!-- grandpa:memories:start -->', '<!-- grandpa:memories:end -->'
+    existing = path.read_text(encoding='utf-8')
+    entries = '\n'.join('- ' + ' '.join(record['content'].split()) for record in records)
+    block = start + '\n' + entries + '\n' + end
+    if start in existing and end in existing:
+        before, remainder = existing.split(start, 1)
+        _, after = remainder.split(end, 1)
+        updated = before + block + after
+    else:
+        updated = existing.rstrip() + '\n\n' + block + '\n'
+    if updated == existing:
+        return
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix='memory-', suffix='.tmp')
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as target:
+            target.write(updated)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def user_profile(app_data_directory, content=None):
+    directory = initialize_memory(app_data_directory)
+    path = directory / 'user.md'
+    if content is not None:
+        if not isinstance(content, str) or len(content) > 4000:
+            raise ValueError('Your profile must be text of at most 4,000 characters')
+        descriptor, temporary = tempfile.mkstemp(dir=directory, prefix='user-', suffix='.tmp')
+        try:
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as target:
+                target.write(content)
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    return {'content': path.read_text(encoding='utf-8-sig')}
 
 
 def initialize_memory(app_data_directory):

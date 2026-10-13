@@ -4,6 +4,8 @@ import { ChangeEvent, FormEvent, KeyboardEvent as ReactKeyboardEvent, useCallbac
 import type { ReactNode } from "react";
 import "./App.css";
 import ModelSettings from './components/ModelSettings';
+import ChromeSettings from './components/ChromeSettings';
+import UserProfile from './components/UserProfile';
 import ReportContent from './components/ReportContent';
 import Reader from './components/Reader';
 import DumpBox from './components/DumpBox';
@@ -1078,7 +1080,7 @@ function WorkspaceApp() {
                         </section>
                       )}
 
-                      {settingsCategory === "ai-models" && <><ModelSettings /><section className="content-panel model-settings-panel"><h2>Grandpa remembers</h2><p>Explicit preferences and corrections retained across MiniPa lifetimes.</p>{memories.map(memory=><div className="settings-row" key={memory.id}><p>{memory.content}</p><button className="text-link" onClick={()=>void workspaceAction('ai.memory.forget',{id:memory.id})}>Forget</button></div>)}{!memories.length && <p>No durable memories yet.</p>}</section></>}
+                      {settingsCategory === "ai-models" && <><ModelSettings /><ChromeSettings /><section className="content-panel model-settings-panel"><h2>Grandpa remembers</h2><UserProfile /><p>Explicit preferences and corrections retained across MiniPa lifetimes.</p>{memories.map(memory=><div className="settings-row" key={memory.id}><p>{memory.content}</p><button className="text-link" onClick={()=>void workspaceAction('ai.memory.forget',{id:memory.id})}>Forget</button></div>)}{!memories.length && <p>No durable memories yet.</p>}</section></>}
                     </div>
                   </div>
                 </section>

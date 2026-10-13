@@ -3,6 +3,18 @@ mod platform;
 mod reader;
 mod notification;
 
+#[tauri::command]
+fn open_chrome_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let folder = if cfg!(debug_assertions) {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../chrome-extension")
+    } else {
+        app.path().resource_dir().map_err(|e| e.to_string())?.join("runtime/app/apps/chrome-extension")
+    };
+    if !folder.join("manifest.json").is_file() { return Err("The Chrome extension is missing from this installation".into()); }
+    app.opener().open_path(folder.to_string_lossy().to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -47,6 +59,7 @@ fn get_capture_shortcut(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 fn register_capture(app: &tauri::AppHandle, shortcut: &str) -> Result<(), String> {
+    let _ = app.global_shortcut().unregister(shortcut);
     app.global_shortcut().on_shortcut(shortcut, |app, _, event| {
         if event.state == ShortcutState::Pressed {
             if let Some(window) = app.get_webview_window("capture") {
@@ -103,7 +116,7 @@ fn test_desktop_notification(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn workspace_request(state: State<'_, BridgeState>, operation: String, payload: Value) -> Result<Value, String> {
-    if !["workspace.get", "minipa.status", "ai.settings.get", "ai.settings.save", "ai.check", "ai.retry", "ai.memory.forget", "ai.analyze", "ai.run"].contains(&operation.as_str()) || !payload.is_object() {
+    if !["workspace.get", "minipa.status", "ai.settings.get", "ai.settings.save", "ai.profile.get", "ai.profile.save", "ai.check", "ai.retry", "ai.memory.forget", "ai.analyze", "ai.run", "browser.status", "browser.pair", "browser.disconnect"].contains(&operation.as_str()) || !payload.is_object() {
         return Err("Unsupported workspace request".into());
     }
     send_engine_request(&state, operation, payload).await
@@ -222,6 +235,7 @@ pub fn run() {
     let task_engine_error = engine_error.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .on_window_event(|window, event| {
             reader::window_event(window, event);
@@ -252,7 +266,16 @@ pub fn run() {
                 .title("OJJIPA Quick Capture").inner_size(640.0, 210.0)
                 .decorations(false).always_on_top(true).visible(false).build()?;
             let shortcut = get_capture_shortcut(app.handle().clone()).unwrap_or(DEFAULT_SHORTCUT.to_owned());
-            if let Err(error) = register_capture(app.handle(), &shortcut) { eprintln!("Capture shortcut unavailable: {error}"); }
+            if let Err(error) = register_capture(app.handle(), &shortcut) {
+                eprintln!("Saved capture shortcut unavailable ({error}); trying the default shortcut");
+                if shortcut != DEFAULT_SHORTCUT {
+                    if let Err(fallback_error) = register_capture(app.handle(), DEFAULT_SHORTCUT) {
+                        eprintln!("Capture shortcut unavailable: {fallback_error}");
+                    } else {
+                        let _ = save_preference(app.handle(), "captureShortcut", json!(DEFAULT_SHORTCUT));
+                    }
+                }
+            }
             let menu = tauri::menu::Menu::with_items(app, &[
                 &tauri::menu::MenuItem::with_id(app, "open-workspace", "Open OJJIPA", true, None::<&str>)?,
                 &tauri::menu::MenuItem::with_id(app, "quick-capture", "Quick capture", true, None::<&str>)?,
@@ -336,6 +359,7 @@ pub fn run() {
             get_notification_preferences,
             save_notification_preferences,
             test_desktop_notification,
+            open_chrome_extension_folder,
             reader::reader_open,
             reader::reader_get,
             reader::reader_navigate,

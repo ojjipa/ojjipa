@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 from core.grandpa.judgment import judge
-from core.grandpa.memory import context_from_records, initialize_memory
+from core.grandpa.memory import context_from_records, initialize_memory, sync_memory
 from core.hermes.runtime import HermesRuntime
 from core.minipa.watchers import fetch_items
 from repos.ai import AIRepository
@@ -40,6 +40,11 @@ class Orchestrator:
         await asyncio.to_thread(recover_ai_jobs, self.db)
         try:
             while True:
+                try:
+                    records = await asyncio.to_thread(AIRepository(self.db).all_memories)
+                    await asyncio.to_thread(sync_memory, records, self.app_data_directory)
+                except Exception:
+                    logging.exception('Memory file sync failed; retrying on next tick')
                 await asyncio.to_thread(retire_expired_watches,self.db)
                 # Pause/retire revoke a live execution, not merely its DB label.
                 for job_id, (task, minipa_id) in list(self.tasks.items()):

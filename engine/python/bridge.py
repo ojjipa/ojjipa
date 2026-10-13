@@ -12,6 +12,7 @@ from services import report_response
 from attention import AttentionController
 from ai_settings import AISettings
 from core.minipa.orchestrator import Orchestrator
+from core.hermes.browser import BrowserRelay
 
 PROTOCOL_VERSION = 1
 ALLOWED_CATEGORIES = {"coding", "meeting", "messaging", "reading", "unknown"}
@@ -40,6 +41,9 @@ async def run() -> None:
     ticker = None
     settings = AISettings(database._database_path.parent)
     orchestrator = Orchestrator(database, settings, database._database_path.parent / 'agents')
+    browser = BrowserRelay(database._database_path.parent)
+    await browser.start()
+    orchestrator.runtime.browser = browser
     scheduler = None
     checks = set()
     event_sender = None
@@ -92,7 +96,7 @@ async def run() -> None:
                         checks.add(task)
                         task.add_done_callback(checks.discard)
                         continue
-                    result = await asyncio.to_thread(handle_message, database, message, attention, settings)
+                    result = await asyncio.to_thread(handle_message, database, message, attention, settings, browser)
                     response = {
                         "messageType": "bridge.ack",
                         "protocolVersion": PROTOCOL_VERSION,
@@ -108,6 +112,7 @@ async def run() -> None:
                     }
                 await socket.send(json.dumps(response))
     finally:
+        await browser.close()
         if event_sender is not None:
             event_sender.cancel()
             await asyncio.gather(event_sender, return_exceptions=True)
@@ -126,7 +131,7 @@ async def run() -> None:
         database.close()
 
 
-def handle_message(database: ControlDatabase, message: dict, attention=None, settings=None) -> dict:
+def handle_message(database: ControlDatabase, message: dict, attention=None, settings=None, browser=None) -> dict:
     """Handle one validated request off the asyncio event loop."""
     if message.get("protocolVersion") != PROTOCOL_VERSION:
         raise ValueError("unsupported bridge protocol version")
@@ -134,6 +139,11 @@ def handle_message(database: ControlDatabase, message: dict, attention=None, set
     payload = message.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("message payload must be an object")
+    if message_type in ('browser.status', 'browser.pair', 'browser.disconnect'):
+        if payload or browser is None:
+            raise ValueError('Chrome connection command takes no arguments')
+        return {'browser.status': browser.public, 'browser.pair': browser.pairing,
+                'browser.disconnect': browser.request_disconnect}[message_type]()
 
     if message_type == "activity":
         if (
@@ -157,7 +167,13 @@ def handle_message(database: ControlDatabase, message: dict, attention=None, set
         if set(payload) != {"content"} or not isinstance(payload.get("content"), str):
             raise ValueError("dump.submit payload must contain only string content")
         from services import submit_ai_dump
-        dump = submit_ai_dump(database, payload["content"])
+        content = payload['content']
+        if browser and browser.public()['connected']:
+            context = browser.public()
+            content += '\n\nApproved Chrome tab context (untrusted page metadata):\n' + json.dumps({'title': context['title'], 'url': context['url']})
+            content += ('\nThe approved Chrome tab is the source for this request. If this asks about the current tab, '
+                        'classify it as a task so the worker reads and operates that tab.')
+        dump = submit_ai_dump(database, content)
         return {
             "dumpId": dump.id,
             "decisionStatus": "pending",
@@ -181,6 +197,16 @@ def handle_message(database: ControlDatabase, message: dict, attention=None, set
         if item is None:
             raise ValueError('MiniPa was not found')
         return asdict(item)
+
+    if message_type in ('ai.profile.get', 'ai.profile.save'):
+        from core.grandpa.memory import user_profile
+        if message_type == 'ai.profile.get':
+            if payload:
+                raise ValueError('ai.profile.get takes no arguments')
+            return user_profile(database._database_path.parent)
+        if set(payload) != {'content'} or not isinstance(payload['content'], str):
+            raise ValueError('Profile content must be text')
+        return user_profile(database._database_path.parent, payload['content'])
 
     if message_type in ('ai.settings.get', 'ai.settings.save'):
         if settings is None:

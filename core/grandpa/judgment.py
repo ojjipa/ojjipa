@@ -13,6 +13,9 @@ duration_minutes (honor an explicitly requested finite duration, otherwise null)
 delivery_mode (papers for periodically requested reading recommendations, otherwise updates),
 search_terms (short scientific keywords for paper recommendations, e.g. "fusion reactor"),
 and memory (a short durable preference or correction explicitly stated by the user, otherwise null).
+Explicit requests such as "remember that I prefer short answers" must populate memory,
+even when verdict is noise because no task needs execution. Remembering is handled by
+Grandpa persistence; do not spawn a MiniPa merely to write a memory file.
 Never infer sensitive facts or store arbitrary task content as memory.
 Task MiniPas have the full available Hermes toolset: shell, filesystem, browser,
 coding, web research, skills and configured integrations. Assign bounded purposes
