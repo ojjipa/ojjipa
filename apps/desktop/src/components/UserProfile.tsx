@@ -22,16 +22,18 @@ export default function UserProfile() {
     } catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   }
-  return <form onSubmit={e => { e.preventDefault(); void save(); }}>
-    <label className="model-field" htmlFor="grandpa-user-profile">About you</label>
-    <p>Add your name, projects, interests, and how you prefer Grandpa to help.</p>
+  return <form className="user-profile-form" onSubmit={e => { e.preventDefault(); void save(); }}>
+    <label className="profile-field-label" htmlFor="grandpa-user-profile">About you</label>
+    <p className="profile-field-help">Add your name, projects, interests, and how you prefer Grandpa to help.</p>
     <textarea id="grandpa-user-profile" rows={8} maxLength={4000}
-      style={{width:'100%', boxSizing:'border-box'}} value={content}
+      className="profile-textarea" value={content}
       disabled={!loaded || busy}
       onChange={e => { setContent(e.target.value); setMessage(''); }} />
-    <p>{content.length}/4,000 characters</p>
-    <button type="submit" disabled={!loaded || busy}>{busy ? 'Saving…' : 'Save profile'}</button>
-    {message && <p role="status">{message}</p>}
-    {error && <p role="alert">{error}</p>}
+    <div className="profile-form-footer">
+      <span>{content.length.toLocaleString()}/4,000 characters</span>
+      <button className="primary-button" type="submit" disabled={!loaded || busy}>{busy ? 'Saving…' : 'Save profile'}</button>
+    </div>
+    {message && <p className="model-config-feedback model-config-success" role="status">{message}</p>}
+    {error && <p className="model-config-feedback model-config-error" role="alert">{error}</p>}
   </form>;
 }

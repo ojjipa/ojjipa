@@ -14,8 +14,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use tauri_plugin_notification::NotificationExt;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -158,11 +157,17 @@ pub async fn run(
                             Ok(response) if response.message_type == "engine.event" && response.protocol_version == PROTOCOL_VERSION => {
                                 if let Some(event) = response.result {
                                     let category = event["category"].as_str().unwrap_or("problems");
-                                    if let Ok(preferences) = super::get_notification_preferences(app.clone()) {
+                                    if category == "devLog" {
+                                        let _ = app.emit("ojjipa-dev-log", event);
+                                    } else if category == "minipaProgress" {
+                                        let _ = app.emit("ojjipa-minipa-progress", event);
+                                    } else if let Ok(preferences) = super::get_notification_preferences(app.clone()) {
                                         if preferences["enabled"] == true && preferences[category] == true {
                                             if let Some(message) = event["message"].as_str() {
                                                 let preview = super::notification::preview(message);
-                                                let _ = app.notification().builder().title("OJJIPA").body(preview).show();
+                                                if let Err(error) = super::send_desktop_notification(&app, "OJJIPA", &preview) {
+                                                    eprintln!("Could not send OJJIPA notification: {error}");
+                                                }
                                             }
                                         }
                                     }
@@ -234,7 +239,11 @@ fn launch_engine(app: &tauri::AppHandle, port: u16, token: &str, database_path: 
         (script, python)
     } else {
         let runtime = app.path().resource_dir().map_err(|e| e.to_string())?.join("runtime");
-        let python = runtime.join("python/python.exe");
+        let python = runtime.join(if cfg!(target_os = "windows") {
+            "python/python.exe"
+        } else {
+            "python/bin/python3"
+        });
         if !python.is_file() {
             return Err("The bundled Python runtime is missing. Repair or reinstall OJJIPA.".into());
         }

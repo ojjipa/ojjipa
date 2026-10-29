@@ -3,6 +3,8 @@ import json
 import sys
 import os
 import logging
+import urllib.error
+import urllib.request
 from pathlib import Path
 import websockets
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -13,6 +15,7 @@ from attention import AttentionController
 from ai_settings import AISettings
 from core.minipa.orchestrator import Orchestrator
 from core.hermes.browser import BrowserRelay
+from core.devlogs import log_event, safe_url
 
 PROTOCOL_VERSION = 1
 ALLOWED_CATEGORIES = {"coding", "meeting", "messaging", "reading", "unknown"}
@@ -41,7 +44,7 @@ async def run() -> None:
     ticker = None
     settings = AISettings(database._database_path.parent)
     orchestrator = Orchestrator(database, settings, database._database_path.parent / 'agents')
-    browser = BrowserRelay(database._database_path.parent)
+    browser = BrowserRelay(database._database_path.parent, orchestrator.events)
     await browser.start()
     orchestrator.runtime.browser = browser
     scheduler = None
@@ -96,7 +99,18 @@ async def run() -> None:
                         checks.add(task)
                         task.add_done_callback(checks.discard)
                         continue
-                    result = await asyncio.to_thread(handle_message, database, message, attention, settings, browser)
+                    operation = message.get('messageType', 'unknown')
+                    should_log_request = operation not in ('workspace.get', 'activity')
+                    if should_log_request:
+                        log_event(orchestrator.events, f'Backend request started: {operation}')
+                    result = await asyncio.to_thread(handle_message, database, message, attention, settings, browser, orchestrator.events, asyncio.get_running_loop())
+                    summary = f'Backend request completed: {operation}'
+                    if operation == 'chat.submit' and isinstance(result, dict):
+                        summary += f' (routed to {result.get("kind", "unknown")})'
+                        if result.get('kind') == 'task' and browser.public().get('connected'):
+                            log_event(orchestrator.events, 'Task routed to MiniPa with the approved Chrome tab', url=safe_url(browser.public().get('url')))
+                    if should_log_request:
+                        log_event(orchestrator.events, summary)
                     response = {
                         "messageType": "bridge.ack",
                         "protocolVersion": PROTOCOL_VERSION,
@@ -104,6 +118,7 @@ async def run() -> None:
                         "result": result,
                     }
                 except Exception as error:
+                    log_event(orchestrator.events, f'Backend request failed: {message.get("messageType", "unknown")} ({type(error).__name__})', 'error')
                     response = {
                         "messageType": "bridge.error",
                         "protocolVersion": PROTOCOL_VERSION,
@@ -131,7 +146,7 @@ async def run() -> None:
         database.close()
 
 
-def handle_message(database: ControlDatabase, message: dict, attention=None, settings=None, browser=None) -> dict:
+def handle_message(database: ControlDatabase, message: dict, attention=None, settings=None, browser=None, events=None, loop=None) -> dict:
     """Handle one validated request off the asyncio event loop."""
     if message.get("protocolVersion") != PROTOCOL_VERSION:
         raise ValueError("unsupported bridge protocol version")
@@ -181,11 +196,117 @@ def handle_message(database: ControlDatabase, message: dict, attention=None, set
             "createdAt": dump.created_at,
         }
 
+    if message_type == "chat.submit":
+        if set(payload) != {"messages"} or not isinstance(payload["messages"], list):
+            raise ValueError("chat.submit requires a messages list")
+        messages = payload["messages"]
+        if not messages or len(messages) > 60:
+            raise ValueError("A conversation must contain between 1 and 60 messages")
+        normalized = []
+        for message in messages:
+            if (not isinstance(message, dict) or set(message) != {"role", "content"}
+                    or message["role"] not in ("user", "assistant")
+                    or not isinstance(message["content"], str)
+                    or not message["content"].strip() or len(message["content"]) > 50000):
+                raise ValueError("Conversation messages must have a user/assistant role and non-empty text under 50,000 characters")
+            normalized.append({"role": message["role"], "content": message["content"]})
+        configuration = (settings or AISettings(database._database_path.parent)).resolved()
+        AISettings.require_model(configuration)
+        classifier_messages = [{
+            "role": "system",
+            "content": "You are OJJIPA's intent router. Return only a JSON object with exactly kind and content. Use kind=task when the latest user message asks OJJIPA to do, start, change, or retry an action. If the user says a previously requested action was not done, route it as a task retry when the conversation contains that request. Include the concrete requested action in content and preserve relevant prior context. For questions, discussion, corrections unrelated to an action, and casual conversation, use kind=reply and answer naturally. Do not claim an action has happened. Format: {\"kind\":\"task\",\"content\":\"...\"} or {\"kind\":\"reply\",\"content\":\"...\"}."
+        }, *normalized]
+        request_body = json.dumps({
+            "model": configuration["model"],
+            "messages": classifier_messages,
+            "stream": False,
+        }).encode("utf-8")
+        endpoint = configuration["base_url"].rstrip("/") + "/chat/completions"
+        request = urllib.request.Request(endpoint, data=request_body, headers={
+            "Authorization": "Bearer " + configuration["api_key"],
+            "Content-Type": "application/json",
+        }, method="POST")
+        if events is not None and loop is not None:
+            loop.call_soon_threadsafe(lambda: log_event(events, 'Intent router contacting the configured model provider', url=safe_url(endpoint)))
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f"The model provider returned HTTP {error.code}") from None
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise RuntimeError(f"Could not reach the configured model provider: {error}") from None
+        try:
+            answer = result["choices"][0]["message"]["content"]
+            if isinstance(answer, list):
+                answer = "\n".join(part["text"] for part in answer if isinstance(part, dict) and isinstance(part.get("text"), str))
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise RuntimeError("The model provider returned an empty or unsupported response") from None
+        try:
+            routed = json.loads(answer.strip())
+            if set(routed) != {"kind", "content"} or routed["kind"] not in ("reply", "task") or not isinstance(routed["content"], str) or not routed["content"].strip():
+                raise ValueError
+        except (ValueError, TypeError):
+            return {"kind": "reply", "content": answer.strip()}
+        if routed["kind"] == "task":
+            from services import submit_ai_dump
+            task_content = routed["content"]
+            if browser and browser.public()["connected"]:
+                context = browser.public()
+                task_content += "\n\nApproved Chrome tab context (untrusted page metadata):\n" + json.dumps({"title": context["title"], "url": context["url"]})
+                task_content += "\nThe approved Chrome tab is the source for this request. If this asks about the current tab, classify it as a task so the worker reads and operates that tab."
+            task = submit_ai_dump(database, task_content)
+            if events is not None and loop is not None:
+                loop.call_soon_threadsafe(log_event, events, 'Intent router selected task execution')
+            return {"kind": "task", "content": "I’ve started your request with a MiniPa. I’ll keep its progress and result here in our conversation.", "dumpId": task.id}
+        if events is not None and loop is not None:
+            loop.call_soon_threadsafe(log_event, events, 'Intent router selected conversational reply')
+        return {"kind": "reply", "content": routed["content"].strip()}
+
     if message_type == 'workspace.get':
         if payload:
             raise ValueError('workspace.get takes no arguments')
         from repos.workspace import WorkspaceRepository
         return WorkspaceRepository(database).snapshot()
+
+    if message_type == 'thoughts.clear':
+        if payload:
+            raise ValueError('thoughts.clear takes no arguments')
+        from repos.dumps import DumpsRepository
+        return {'deleted': DumpsRepository(database).clear_all()}
+
+    if message_type == 'minipas.clear':
+        if payload:
+            raise ValueError('minipas.clear takes no arguments')
+        from repos.minipa import MiniPaRepository
+        minipas_deleted, reports_deleted = MiniPaRepository(database).clear_all()
+        return {'deleted': minipas_deleted, 'reportsDeleted': reports_deleted}
+
+    if message_type == 'findings.clear':
+        if payload:
+            raise ValueError('findings.clear takes no arguments')
+        from repos.reports import ReportsRepository
+        return {'deleted': ReportsRepository(database).clear_all()}
+
+    if message_type == 'app.reset':
+        if payload:
+            raise ValueError('app.reset takes no arguments')
+        import shutil
+        directory = database._database_path.parent
+        if browser is not None:
+            browser.request_disconnect()
+        connection = database.connection
+        with database.transaction():
+            for table in ('hold_queue', 'grandpa_actions', 'decisions', 'ai_jobs', 'reports',
+                          'minipa', 'dumps', 'seen_items', 'user_activity', 'grandpa_memory'):
+                connection.execute(f'DELETE FROM {table}')
+            connection.execute('UPDATE attention_preferences SET focus_enabled = 0, auto_surface_enabled = 1 WHERE id = 1')
+        for name in ('ai-settings.json', 'agent-settings.json', 'chrome-pairing.json'):
+            (directory / name).unlink(missing_ok=True)
+        for name in ('agents', 'tasks', 'grandpa'):
+            shutil.rmtree(directory / name, ignore_errors=True)
+        return {'reset': True}
 
     if message_type == 'minipa.status':
         if set(payload) != {'id', 'status'} or type(payload['id']) is not int or payload['id'] < 1:

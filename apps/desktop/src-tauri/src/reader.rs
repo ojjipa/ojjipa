@@ -5,7 +5,7 @@ use tauri::{Manager, WebviewUrl};
 use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tokio::sync::oneshot;
 
-const TOP: f64 = 72.0;
+const TOP: f64 = 88.0;
 const BOTTOM: f64 = 210.0;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -18,12 +18,13 @@ pub struct Snapshot {
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub pinned: bool,
+    pub loading: bool,
 }
 
 impl Default for Snapshot {
     fn default() -> Self {
         Self { url: "https://arxiv.org/".into(), title: "OJJIPA Reader".into(),
-            width: 760.0, height: 840.0, x: None, y: None, pinned: true }
+            width: 760.0, height: 840.0, x: None, y: None, pinned: true, loading: false }
     }
 }
 
@@ -119,10 +120,24 @@ pub async fn reader_open(app: tauri::AppHandle, url: Option<String>) -> Result<S
         let load_app = app.clone();
         let title_app = app.clone();
         let builder = WebviewBuilder::new("reader-page",WebviewUrl::External(page_url))
-            .initialization_script("document.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); location.href = 'ojjipa-reader-close://hide'; } });")
+            .initialization_script("document.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); location.href = 'ojjipa-reader-close://hide'; return; } if (e.metaKey || e.ctrlKey) { const key = e.key.toLowerCase(); if (key === 'l') { e.preventDefault(); location.href = 'ojjipa-reader-shortcut://address'; } else if (key === 'r') { e.preventDefault(); location.href = 'ojjipa-reader-shortcut://reload'; } } }, true);")
             .on_navigation(move |url| {
                 if url.scheme() == "ojjipa-reader-close" {
-                    let _ = reader_hide(nav_app.clone());
+                    let _ = reader_close(nav_app.clone());
+                    return false;
+                }
+                if url.scheme() == "ojjipa-reader-shortcut" {
+                    match url.host_str() {
+                        Some("address") => {
+                            if let Some(controls) = nav_app.get_webview("reader-controls") {
+                                let _ = controls.eval("const a=document.querySelector('[aria-label=\"Page address\"]');a?.focus();a?.select();");
+                            }
+                        }
+                        Some("reload") => {
+                            if let Some(page) = nav_app.get_webview("reader-page") { let _ = page.eval("location.reload()"); }
+                        }
+                        _ => {}
+                    }
                     return false;
                 }
                 if browser_url(url.as_str()).is_err() { return false; }
@@ -145,7 +160,11 @@ pub async fn reader_open(app: tauri::AppHandle, url: Option<String>) -> Result<S
                 }
             })
             .on_page_load(move |_, payload| {
-                if payload.event() == PageLoadEvent::Finished { let _ = persist(&load_app); }
+                let finished = payload.event() == PageLoadEvent::Finished;
+                if let Ok(mut state) = load_app.state::<ReaderState>().0.lock() {
+                    state.loading = !finished;
+                }
+                if finished { let _ = persist(&load_app); }
             });
         let size = window.inner_size().map_err(|e| e.to_string())?;
         let scale = window.scale_factor().map_err(|e| e.to_string())?;
@@ -190,9 +209,9 @@ pub async fn reader_navigate(app: tauri::AppHandle, action: String, url: Option<
 }
 
 #[tauri::command]
-pub fn reader_hide(app: tauri::AppHandle) -> Result<(),String> {
+pub fn reader_close(app: tauri::AppHandle) -> Result<(),String> {
     persist(&app)?;
-    app.get_window("reader").ok_or("Reader unavailable")?.hide().map_err(|e| e.to_string())
+    app.get_window("reader").ok_or("Reader unavailable")?.close().map_err(|e| e.to_string())
 }
 
 #[tauri::command]

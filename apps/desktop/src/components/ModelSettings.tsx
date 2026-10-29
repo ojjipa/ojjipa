@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
+type ModelSettingsProps = { onConfigured?: () => void };
+
 type Settings = {
   model: string; base_url: string;
   timeout_seconds: number; has_api_key: boolean; has_tavily_key: boolean;
 };
 
-export default function ModelSettings() {
+export default function ModelSettings({ onConfigured }: ModelSettingsProps) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [tavilyKey, setTavilyKey] = useState('');
@@ -15,8 +17,9 @@ export default function ModelSettings() {
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     invoke<Settings>('workspace_request', {operation:'ai.settings.get',payload:{}})
-      .then(setSettings).catch(e => setError(String(e)));
-  }, []);
+      .then(value => { setSettings(value); if (value.has_api_key) onConfigured?.(); })
+      .catch(e => setError(String(e)));
+  }, [onConfigured]);
   async function save(check = false) {
     if (!settings) return;
     setBusy(true); setError(''); setMessage('');
@@ -26,6 +29,7 @@ export default function ModelSettings() {
         api_key:apiKey, tavily_key:tavilyKey,
       }});
       setSettings(saved); setApiKey(''); setTavilyKey('');
+      if (saved.has_api_key) onConfigured?.();
       setMessage(check ? 'Checking the real Hermes/model connection…' : 'Saved. Queued thoughts will be processed automatically.');
       if (check) {
         const result = await invoke<{message:string}>('workspace_request', {operation:'ai.check',payload:{}});
@@ -35,8 +39,11 @@ export default function ModelSettings() {
     finally { setBusy(false); }
   }
   return <section className="content-panel model-settings-panel">
-    <h2>Grandpa & Hermes</h2>
-    <p>Grandpa judges your thoughts; temporary MiniPas use the real Hermes runtime. Your thought and relevant context are sent to the model provider you choose.</p>
+    <div className="settings-section-heading">
+      <p className="workroom-overline">GRANDPA &amp; HERMES</p>
+      <h2>Choose your model</h2>
+      <p>Grandpa judges your thoughts; temporary MiniPas use the real Hermes runtime. Your thought and relevant context are sent to the model provider you choose.</p>
+    </div>
     {settings && <>
       <label className="model-field"><span>Model name</span><input value={settings.model} onChange={e=>setSettings({...settings,model:e.target.value})} placeholder="Your provider’s exact model ID" /></label>
       <label className="model-field"><span>API base URL</span><input value={settings.base_url} onChange={e=>setSettings({...settings,base_url:e.target.value})} /></label>
@@ -45,7 +52,7 @@ export default function ModelSettings() {
         <label className="model-field"><span>Tavily key for web research</span><input type="password" autoComplete="new-password" value={tavilyKey} onChange={e=>setTavilyKey(e.target.value)} placeholder={settings.has_tavily_key?'Saved · leave blank to keep':'Optional web search credential'} /></label>
       </div>
       <label className="model-field"><span>Task time budget (seconds)</span><input type="number" min={30} max={900} value={settings.timeout_seconds} onChange={e=>setSettings({...settings,timeout_seconds:Number(e.target.value)})} /></label>
-      <p>Task workers have the full available Hermes toolset, including files, shell and browser. Pause stops execution; resume starts it again. Retire cancels it permanently. arXiv watchers run while OJJIPA is open.</p>
+      <p className="model-settings-note">Task workers have the full available Hermes toolset, including files, shell and browser. Pause stops execution; resume starts it again. Retire cancels it permanently. arXiv watchers run while OJJIPA is open.</p>
       <div className="model-settings-actions"><button className="primary-button" disabled={busy} onClick={()=>void save()}>{busy?'Working…':'Save settings'}</button><button className="text-link" disabled={busy} onClick={()=>void save(true)}>Save & check connection</button></div>
     </>}
     {message && <p className="model-config-feedback model-config-success" role="status">{message}</p>}

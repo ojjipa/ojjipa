@@ -5,6 +5,23 @@ import os
 from pathlib import Path
 import sys
 import traceback
+from urllib.parse import urlsplit, urlunsplit
+
+
+def _emit_tool_progress(request, state, call_id, name, arguments):
+    if not request.get('progress_events'):
+        return
+    event = {'state': state, 'tool': str(name)[:100]}
+    if name == 'browser_navigate' and isinstance(arguments, dict):
+        try:
+            parts = urlsplit(str(arguments.get('url', '')))
+            if parts.scheme in ('http', 'https') and parts.hostname:
+                host = parts.hostname + (f':{parts.port}' if parts.port else '')
+                event['url'] = urlunsplit((parts.scheme, host, parts.path[:500], '', ''))
+        except (TypeError, ValueError):
+            pass
+    sys.stderr.write('OJJIPA_PROGRESS ' + json.dumps(event, ensure_ascii=False) + '\n')
+    sys.stderr.flush()
 
 
 def main():
@@ -29,11 +46,15 @@ def main():
             browser_binding = attach_browser(request['browser'], request['browser_session'])
         from run_agent import AIAgent
         def tool_completed(call_id, name, arguments, result):
+            _emit_tool_progress(request, 'completed', call_id, name, arguments)
             # Require an initial execution, then let Hermes either continue
             # using tools or return its final answer. Requiring every turn
             # prevents normal completion and therefore MiniPa retirement.
             agent.request_overrides = {
                 **(agent.request_overrides or {}), 'tool_choice': 'auto'}
+
+        def tool_started(call_id, name, arguments):
+            _emit_tool_progress(request, 'started', call_id, name, arguments)
 
         agent = AIAgent(
             model=request['model'], base_url=request['base_url'],
@@ -51,6 +72,7 @@ def main():
             cwd=str(Path.cwd()), ephemeral_system_prompt=request['system'],
             session_id=request.get('browser_session'),
             reasoning_config={'enabled':False}, max_tokens=6000 if request['full_tools'] else 1800,
+            tool_start_callback=tool_started if request.get('progress_events') else None,
             # A full MiniPa is an execution task, not a chat turn. Require the
             # provider to emit a real tool call before Hermes can answer.
             request_overrides={'tool_choice': 'required'} if request['full_tools'] else None,

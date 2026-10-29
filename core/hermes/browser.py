@@ -6,13 +6,14 @@ from pathlib import Path
 import secrets
 from urllib.parse import urlparse
 import websockets
+from core.devlogs import log_event, safe_url
 
 CAPABILITIES = ['browser_snapshot', 'browser_navigate', 'browser_click', 'browser_type',
                 'browser_scroll', 'browser_back', 'browser_press', 'browser_tabs', 'browser_tab_activate']
 
 
 class BrowserRelay:
-    def __init__(self, directory):
+    def __init__(self, directory, events=None):
         self.directory = Path(directory)
         self.port = 8766
         self.server = None
@@ -21,6 +22,7 @@ class BrowserRelay:
         self.leases = {}
         self.lock = asyncio.Lock()
         self.error = ''
+        self.events = events
         path = self.directory / 'chrome-pairing.json'
         try:
             self.token = json.loads(path.read_text(encoding='utf-8'))['token']
@@ -69,6 +71,8 @@ class BrowserRelay:
             raise RuntimeError('The approved Chrome tab disconnected before execution')
         peer = self.current
         key = secrets.token_urlsafe(32)
+        if self.events:
+            log_event(self.events, 'Browser access acquired for a task', url=safe_url(peer['tab'].get('url')))
         lease = {'url': f'ws://127.0.0.1:{self.port}', 'token': key,
                  'controller_id': peer['id'], 'profile_id': peer['profile'],
                  'tab': dict(peer['tab']), 'capabilities': list(CAPABILITIES)}
@@ -80,6 +84,8 @@ class BrowserRelay:
         if not lease or not self.current or lease['controller_id'] != self.current['id']:
             raise RuntimeError('The approved Chrome tab is unavailable')
         command_id = secrets.token_urlsafe(18)
+        if self.events:
+            log_event(self.events, 'Reading the approved Chrome tab', url=safe_url(lease['tab'].get('url')))
         future = self.loop.create_future()
         self.pending[command_id] = (self.current['id'], future)
         frame = {'method': 'browser.controller.command', 'params': {
@@ -127,6 +133,8 @@ class BrowserRelay:
                 peer = {'id': secrets.token_hex(16), 'socket': socket,
                         'profile': str(hello.get('profile', ''))[:100], 'tab': self.tab(hello.get('tab'))}
                 self.current = peer
+                if self.events:
+                    log_event(self.events, 'Chrome tab connected', url=safe_url(peer['tab']['url']))
                 await socket.send(json.dumps({'type': 'ready'}))
                 async for raw in socket:
                     frame = json.loads(raw)
@@ -150,6 +158,10 @@ class BrowserRelay:
                 if frame.get('method') != 'browser.controller.command' or params.get('action') not in CAPABILITIES:
                     raise ValueError('Unsupported Chrome command')
                 command_id = params['command_id']
+                if self.events:
+                    args = params.get('arguments') or {}
+                    destination = safe_url(args.get('url', '')) if params.get('action') == 'browser_navigate' else ''
+                    log_event(self.events, f"Chrome action: {params.get('action')}", url=destination)
                 if command_id in self.pending:
                     raise ValueError('Duplicate Chrome command')
                 future = self.loop.create_future()
@@ -182,6 +194,8 @@ class BrowserRelay:
             pass
         finally:
             if peer and self.current is peer:
+                if self.events:
+                    log_event(self.events, 'Chrome tab disconnected')
                 self.current = None
                 for identity, future in self.pending.values():
                     if identity == peer['id'] and not future.done():

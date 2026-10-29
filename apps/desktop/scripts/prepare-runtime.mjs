@@ -9,10 +9,12 @@ if (process.argv.includes('--development')) {
   mkdirSync(path.join(root, 'apps/desktop/src-tauri/resources/runtime'), { recursive: true });
   process.exit(0);
 }
-if (process.platform !== 'win32' || process.arch !== 'x64') {
-  throw new Error('This runtime packager currently supports Windows x64 only.');
+const windows = process.platform === 'win32' && process.arch === 'x64';
+const macOS = process.platform === 'darwin' && process.arch === 'arm64';
+if (!windows && !macOS) {
+  throw new Error('This runtime packager supports Windows x64 and macOS Apple Silicon.');
 }
-const python = path.join(root, '.venv-hermes', 'Scripts', 'python.exe');
+const python = path.join(root, '.venv-hermes', windows ? 'Scripts/python.exe' : 'bin/python');
 const result = spawnSync(python, [path.join(root, 'apps/desktop/scripts/prepare_runtime.py')], {
   stdio: 'inherit', cwd: root,
 });

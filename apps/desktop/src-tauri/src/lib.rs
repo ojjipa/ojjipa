@@ -6,13 +6,63 @@ mod notification;
 #[tauri::command]
 fn open_chrome_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    let folder = installed_chrome_extension_folder(&app)?;
+    let folder = folder.as_path();
+    if !folder.join("manifest.json").is_file() { return Err("The Chrome extension is missing from this installation".into()); }
+    app.opener().open_path(folder.to_string_lossy().to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
+fn chrome_extension_source(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let folder = if cfg!(debug_assertions) {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../chrome-extension")
     } else {
         app.path().resource_dir().map_err(|e| e.to_string())?.join("runtime/app/apps/chrome-extension")
     };
-    if !folder.join("manifest.json").is_file() { return Err("The Chrome extension is missing from this installation".into()); }
-    app.opener().open_path(folder.to_string_lossy().to_string(), None::<&str>).map_err(|e| e.to_string())
+    Ok(folder)
+}
+
+fn installed_chrome_extension_folder(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let source = chrome_extension_source(app)?;
+    if !source.join("manifest.json").is_file() { return Err("The Chrome extension is missing from this installation".into()); }
+    let target = app.path().app_data_dir().map_err(|e| e.to_string())?.join("chrome-extension");
+    std::fs::create_dir_all(&target).map_err(|e| format!("Could not prepare the Chrome extension folder: {e}"))?;
+    copy_extension_tree(&source, &target)?;
+    Ok(target)
+}
+
+fn copy_extension_tree(source: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(source).map_err(|e| format!("Could not read bundled Chrome extension: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_dir() {
+            std::fs::create_dir_all(&to).map_err(|e| e.to_string())?;
+            copy_extension_tree(&from, &to)?;
+        } else if kind.is_file() {
+            std::fs::copy(&from, &to).map_err(|e| format!("Could not copy Chrome extension file: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_up_chrome_extension(app: tauri::AppHandle) -> Result<String, String> {
+    let folder = installed_chrome_extension_folder(&app)?;
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .args(["-a", "Google Chrome", "chrome://extensions"])
+            .status()
+            .map_err(|e| format!("Could not open Google Chrome: {e}"))?;
+        if !status.success() { return Err("Could not open Google Chrome. Make sure Chrome is installed, then try again.".into()); }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener().open_url("chrome://extensions", None::<&str>).map_err(|e| e.to_string())?;
+    }
+    Ok(folder.to_string_lossy().into_owned())
 }
 
 use serde_json::{json, Value};
@@ -92,12 +142,18 @@ fn hide_capture_window(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn get_notification_preferences(app: tauri::AppHandle) -> Result<Value, String> {
     let stored = load_preferences(&app)?;
-    Ok(stored.get("notifications").cloned().unwrap_or(json!({"enabled":true,"taskCompletions":true,"reminders":true,"resurfacedItems":true,"problems":true,"updates":true})))
+    let mut preferences = stored.get("notifications").cloned().unwrap_or_else(|| json!({}));
+    let object = preferences.as_object_mut().ok_or("Invalid notification settings")?;
+    for key in ["enabled", "taskCompletions", "reminders", "resurfacedItems", "problems"] {
+        object.entry(key).or_insert(Value::Bool(true));
+    }
+    object.remove("updates");
+    Ok(preferences)
 }
 
 #[tauri::command]
 fn save_notification_preferences(app: tauri::AppHandle, preferences: Value) -> Result<Value, String> {
-    let keys = ["enabled","taskCompletions","reminders","resurfacedItems","problems","updates"];
+    let keys = ["enabled","taskCompletions","reminders","resurfacedItems","problems"];
     let object = preferences.as_object().ok_or("Invalid notification settings")?;
     if object.len() != keys.len() || keys.iter().any(|key| !preferences[*key].is_boolean()) {
         return Err("Invalid notification settings".into());
@@ -106,20 +162,68 @@ fn save_notification_preferences(app: tauri::AppHandle, preferences: Value) -> R
     Ok(preferences)
 }
 
+pub(crate) fn send_desktop_notification(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use mac_usernotifications::AuthorizationStatus;
+
+        let settings = mac_usernotifications::blocking::get_notification_settings()
+            .map_err(|error| format!("Could not read macOS notification access: {error}"))?;
+        match settings.authorization_status {
+            AuthorizationStatus::Authorized
+            | AuthorizationStatus::Provisional
+            | AuthorizationStatus::Ephemeral => {}
+            AuthorizationStatus::NotDetermined => {
+                let granted = notify_rust::request_auth_blocking()
+                    .map_err(|error| format!("Could not request macOS notification access: {error}"))?;
+                if !granted {
+                    return Err("macOS has not granted OJJIPA notification access yet. If you already enabled it, quit and reopen OJJIPA, then retry.".into());
+                }
+            }
+            AuthorizationStatus::Denied => {
+                return Err("macOS reports notification access is denied for this OJJIPA app installation. Check System Settings → Notifications → OJJIPA, then quit and reopen the app.".into());
+            }
+            AuthorizationStatus::Unknown => {
+                // Try delivery and surface the system's concrete error if it fails.
+            }
+        }
+        notify_rust::Notification::new().summary(title).body(body).show().map_err(|error| format!("macOS could not deliver the notification: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        app.notification().builder().title(title).body(body).show().map_err(|error| error.to_string())
+    }
+}
+
 #[tauri::command]
 fn test_desktop_notification(app: tauri::AppHandle) -> Result<(), String> {
     if get_notification_preferences(app.clone())?["enabled"] != true {
         return Err("Enable desktop notifications first".into());
     }
-    app.notification().builder().title("OJJIPA").body("Your desktop notifications are connected.").show().map_err(|e| e.to_string())
+    send_desktop_notification(&app, "OJJIPA", "Your desktop notifications are connected.")
 }
 
 #[tauri::command]
 async fn workspace_request(state: State<'_, BridgeState>, operation: String, payload: Value) -> Result<Value, String> {
-    if !["workspace.get", "minipa.status", "ai.settings.get", "ai.settings.save", "ai.profile.get", "ai.profile.save", "ai.check", "ai.retry", "ai.memory.forget", "ai.analyze", "ai.run", "browser.status", "browser.pair", "browser.disconnect"].contains(&operation.as_str()) || !payload.is_object() {
+    if !["workspace.get", "thoughts.clear", "minipas.clear", "findings.clear", "minipa.status", "ai.settings.get", "ai.settings.save", "ai.profile.get", "ai.profile.save", "ai.check", "ai.retry", "ai.memory.forget", "ai.analyze", "ai.run", "chat.submit", "browser.status", "browser.pair", "browser.disconnect"].contains(&operation.as_str()) || !payload.is_object() {
         return Err("Unsupported workspace request".into());
     }
     send_engine_request(&state, operation, payload).await
+}
+
+#[tauri::command]
+async fn reset_app(app: tauri::AppHandle, state: State<'_, BridgeState>) -> Result<(), String> {
+    send_engine_request(&state, "app.reset".into(), json!({})).await?;
+    let preferences = app.path().app_data_dir().map_err(|e| e.to_string())?.join("ui-preferences.json");
+    match fs::remove_file(preferences) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    app.exit(0);
+    Ok(())
 }
 
 /// Tauri commands to get the active window transparency and agent activity
@@ -146,20 +250,12 @@ async fn get_agent_activity(
 
 /// Persist a user-created dump through the Python engine and return its result.
 #[tauri::command]
-async fn submit_dump(app: tauri::AppHandle, state: State<'_, BridgeState>, content: String) -> Result<Value, String> {
+async fn submit_dump(state: State<'_, BridgeState>, content: String) -> Result<Value, String> {
     if content.trim().is_empty() {
         return Err("Dump content cannot be empty".to_owned());
     }
 
-    let result = send_engine_request(&state, "dump.submit".into(), json!({"content": content})).await;
-    if let Ok(preferences) = get_notification_preferences(app.clone()) {
-        let category = if result.is_ok() { "updates" } else { "problems" };
-        if preferences["enabled"] == true && preferences[category] == true {
-            let body = if result.is_ok() { "Your thought was saved to your private inbox." } else { "Your thought could not be saved. Open OJJIPA to try again." };
-            let _ = app.notification().builder().title("OJJIPA").body(body).show();
-        }
-    }
-    result
+    send_engine_request(&state, "dump.submit".into(), json!({"content": content})).await
 }
 
 struct PendingGuard {
@@ -240,6 +336,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             reader::window_event(window, event);
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "reader" { return; }
                 api.prevent_close();
                 let _ = window.hide();
             }
@@ -264,7 +361,7 @@ pub fn run() {
             fs::create_dir_all(&app_data_dir)?;
             tauri::WebviewWindowBuilder::new(app, "capture", tauri::WebviewUrl::App("index.html".into()))
                 .title("OJJIPA Quick Capture").inner_size(640.0, 210.0)
-                .decorations(false).always_on_top(true).visible(false).build()?;
+                .decorations(false).transparent(true).always_on_top(true).visible(false).build()?;
             let shortcut = get_capture_shortcut(app.handle().clone()).unwrap_or(DEFAULT_SHORTCUT.to_owned());
             if let Err(error) = register_capture(app.handle(), &shortcut) {
                 eprintln!("Saved capture shortcut unavailable ({error}); trying the default shortcut");
@@ -360,10 +457,12 @@ pub fn run() {
             save_notification_preferences,
             test_desktop_notification,
             open_chrome_extension_folder,
+            set_up_chrome_extension,
+            reset_app,
             reader::reader_open,
             reader::reader_get,
             reader::reader_navigate,
-            reader::reader_hide,
+            reader::reader_close,
             reader::reader_pin,
             reader::reader_selection
         ];

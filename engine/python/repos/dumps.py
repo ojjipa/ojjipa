@@ -44,3 +44,29 @@ class DumpsRepository:
             (limit,),
         ).fetchall()
         return [_to_dump(row) for row in rows]
+
+    def clear_all(self) -> int:
+        """Delete saved thoughts while preserving workers, reports, and memories."""
+        with self._database.transaction():
+            connection = self._database.connection
+            count = connection.execute("SELECT COUNT(*) FROM dumps").fetchone()[0]
+            if count == 0:
+                return 0
+
+            connection.execute(
+                "DELETE FROM decisions WHERE dump_id IN (SELECT id FROM dumps)"
+            )
+            connection.execute(
+                "DELETE FROM ai_jobs WHERE phase = 'judge' "
+                "AND dump_id IN (SELECT id FROM dumps)"
+            )
+            connection.execute(
+                "UPDATE ai_jobs SET dump_id = NULL "
+                "WHERE dump_id IN (SELECT id FROM dumps)"
+            )
+            connection.execute(
+                "UPDATE grandpa_memory SET source_dump_id = NULL "
+                "WHERE source_dump_id IN (SELECT id FROM dumps)"
+            )
+            connection.execute("DELETE FROM dumps")
+        return count
