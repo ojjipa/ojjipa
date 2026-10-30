@@ -161,12 +161,15 @@ pub async fn run(
                                         let _ = app.emit("ojjipa-dev-log", event);
                                     } else if category == "minipaProgress" {
                                         let _ = app.emit("ojjipa-minipa-progress", event);
-                                    } else if let Ok(preferences) = super::get_notification_preferences(app.clone()) {
-                                        if preferences["enabled"] == true && preferences[category] == true {
-                                            if let Some(message) = event["message"].as_str() {
-                                                let preview = super::notification::preview(message);
-                                                if let Err(error) = super::send_desktop_notification(&app, "OJJIPA", &preview) {
-                                                    eprintln!("Could not send OJJIPA notification: {error}");
+                                    } else if matches!(category, "taskCompletions" | "reminders" | "resurfacedItems" | "problems") {
+                                        let _ = app.emit("ojjipa-notification", event.clone());
+                                        if let Ok(preferences) = super::get_notification_preferences(app.clone()) {
+                                            if preferences["enabled"] == true && preferences[category] == true {
+                                                if let Some(message) = event["message"].as_str() {
+                                                    let preview = super::notification::preview(message);
+                                                    if let Err(error) = super::send_desktop_notification(&app, "OJJIPA", &preview) {
+                                                        eprintln!("Could not send OJJIPA notification: {error}");
+                                                    }
                                                 }
                                             }
                                         }

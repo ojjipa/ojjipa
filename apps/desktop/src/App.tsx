@@ -46,6 +46,7 @@ type NotificationPreferences = {
 
 type NotificationCategory = Exclude<keyof NotificationPreferences, "enabled">;
 type SettingsCategory = "appearance" | "notifications" | "ai-models" | "developer";
+type DesktopNotificationEvent = { category: NotificationCategory; message?: string };
 type DeveloperLog = { category: "devLog"; timestamp: string; level: string; message: string; url?: string };
 type MiniPaProgress = { timestamp: string; minipaId: number; jobId: number; phase: string; step: string; state: "started" | "running" | "completed" | "failed"; tool?: string; url?: string };
 
@@ -495,6 +496,20 @@ function WorkspaceApp() {
     if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
   }, []);
 
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<DesktopNotificationEvent>("ojjipa-notification", ({ payload }) => {
+      if (!payload || typeof payload.message !== "string" || !payload.message.trim()) return;
+      showToast(payload.message, payload.category === "problems" ? "error" : "success");
+    }).then((stop) => {
+      if (cancelled) stop();
+      else unlisten = stop;
+    }).catch((error: unknown) => console.error("Could not subscribe to OJJIPA notifications:", error));
+    return () => { cancelled = true; unlisten?.(); };
+  }, [showToast]);
+
   const refreshWorkspace = useCallback(async () => {
     if (!isTauri()) return;
     try {
@@ -746,21 +761,7 @@ function WorkspaceApp() {
     if (settled.length === 0) return;
     const settledIds = new Set(settled.map(({ id }) => id));
     setPendingThoughts((current) => current.filter(({ id }) => !settledIds.has(id)));
-    const failures = settled.filter(({ id }) => {
-      const thought = capturedThoughts.find((item) => item.id === id);
-      const job = jobs.find((item) => item.dump_id === id && item.phase === "judge");
-      return Boolean(thought?.analysisError || job && ["failed", "cancelled"].includes(job.status));
-    });
-    if (failures.length > 0) {
-      const job = jobs.find((item) => item.dump_id === failures[0].id && item.phase === "judge");
-      showToast(job?.error || "Grandpa couldn’t finish reviewing that thought. You can retry from Thoughts.", "error");
-    } else {
-      const first = capturedThoughts.find((item) => item.id === settled[0].id);
-      showToast(first?.decision?.minipa
-        ? `Grandpa finished · MiniPa #${first.decision.minipa.id} created.`
-        : "Grandpa finished reviewing your thought.");
-    }
-  }, [capturedThoughts, jobs, pendingThoughts, showToast]);
+  }, [capturedThoughts, jobs, pendingThoughts]);
 
   async function handleFilesSelected(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.currentTarget.files ?? []);

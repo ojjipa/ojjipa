@@ -361,7 +361,10 @@ pub fn run() {
             fs::create_dir_all(&app_data_dir)?;
             tauri::WebviewWindowBuilder::new(app, "capture", tauri::WebviewUrl::App("index.html".into()))
                 .title("OJJIPA Quick Capture").inner_size(640.0, 210.0)
-                .decorations(false).transparent(true).always_on_top(true).visible(false).build()?;
+                // The native shadow on a transparent macOS window is rectangular and
+                // shows through the rounded quick-capture surface as a black frame.
+                // The surface already draws its own rounded CSS shadow.
+                .decorations(false).transparent(true).shadow(false).always_on_top(true).visible(false).build()?;
             let shortcut = get_capture_shortcut(app.handle().clone()).unwrap_or(DEFAULT_SHORTCUT.to_owned());
             if let Err(error) = register_capture(app.handle(), &shortcut) {
                 eprintln!("Saved capture shortcut unavailable ({error}); trying the default shortcut");

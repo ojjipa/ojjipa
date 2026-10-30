@@ -89,6 +89,10 @@ class Orchestrator:
                     raise ValueError('Source thought was not found')
                 proposal = await judge(self.runtime, dump.content, context)
                 await self.commit(decide_ai_dump, job, proposal)
+                await self.events.put({
+                    'category': 'taskCompletions',
+                    'message': f"Grandpa finished reviewing thought #{job['dump_id']}: {proposal['reason']}",
+                })
                 return
             item = await asyncio.to_thread(MiniPaRepository(self.db).get_by_id, job['minipa_id'])
             if item is None or item.status != MinipaStatus.ACTIVE:
