@@ -45,3 +45,16 @@ class ReportsRepository:
             (minipa_id,),
         ).fetchall()
         return [_to_report(row) for row in rows]
+
+    def clear_all(self) -> int:
+        """Delete findings and their hold and decision records."""
+        connection = self._database.connection
+        with self._database.transaction():
+            report_ids = [row[0] for row in connection.execute("SELECT id FROM reports")]
+            if not report_ids:
+                return 0
+            marks = ",".join("?" for _ in report_ids)
+            connection.execute(f"DELETE FROM hold_queue WHERE report_id IN ({marks})", report_ids)
+            connection.execute(f"DELETE FROM grandpa_actions WHERE report_id IN ({marks})", report_ids)
+            connection.execute(f"DELETE FROM reports WHERE id IN ({marks})", report_ids)
+        return len(report_ids)

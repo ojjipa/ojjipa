@@ -1,13 +1,80 @@
 mod bridge;
 mod platform;
+mod reader;
+mod notification;
+
+#[tauri::command]
+fn open_chrome_extension_folder(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let folder = installed_chrome_extension_folder(&app)?;
+    let folder = folder.as_path();
+    if !folder.join("manifest.json").is_file() { return Err("The Chrome extension is missing from this installation".into()); }
+    app.opener().open_path(folder.to_string_lossy().to_string(), None::<&str>).map_err(|e| e.to_string())
+}
+
+fn chrome_extension_source(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let folder = if cfg!(debug_assertions) {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../chrome-extension")
+    } else {
+        app.path().resource_dir().map_err(|e| e.to_string())?.join("runtime/app/apps/chrome-extension")
+    };
+    Ok(folder)
+}
+
+fn installed_chrome_extension_folder(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let source = chrome_extension_source(app)?;
+    if !source.join("manifest.json").is_file() { return Err("The Chrome extension is missing from this installation".into()); }
+    let target = app.path().app_data_dir().map_err(|e| e.to_string())?.join("chrome-extension");
+    std::fs::create_dir_all(&target).map_err(|e| format!("Could not prepare the Chrome extension folder: {e}"))?;
+    copy_extension_tree(&source, &target)?;
+    Ok(target)
+}
+
+fn copy_extension_tree(source: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(source).map_err(|e| format!("Could not read bundled Chrome extension: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_dir() {
+            std::fs::create_dir_all(&to).map_err(|e| e.to_string())?;
+            copy_extension_tree(&from, &to)?;
+        } else if kind.is_file() {
+            std::fs::copy(&from, &to).map_err(|e| format!("Could not copy Chrome extension file: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_up_chrome_extension(app: tauri::AppHandle) -> Result<String, String> {
+    let folder = installed_chrome_extension_folder(&app)?;
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .args(["-a", "Google Chrome", "chrome://extensions"])
+            .status()
+            .map_err(|e| format!("Could not open Google Chrome: {e}"))?;
+        if !status.success() { return Err("Could not open Google Chrome. Make sure Chrome is installed, then try again.".into()); }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener().open_url("chrome://extensions", None::<&str>).map_err(|e| e.to_string())?;
+    }
+    Ok(folder.to_string_lossy().into_owned())
+}
 
 use serde_json::{json, Value};
 use std::{
     fs,
+    sync::{Arc, Mutex},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 use tauri::{Manager, State};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
@@ -16,6 +83,147 @@ struct BridgeState {
     dump_tx: mpsc::Sender<bridge::DumpRequest>,
     pending_requests: bridge::PendingRequests,
     next_request_id: AtomicU64,
+    engine_error: Arc<Mutex<Option<String>>>,
+}
+
+const DEFAULT_SHORTCUT: &str = "CommandOrControl+Alt+Shift+Space";
+
+fn load_preferences(app: &tauri::AppHandle) -> Result<Value, String> {
+    let path = app.path().app_data_dir().map_err(|e| e.to_string())?.join("ui-preferences.json");
+    if !path.exists() { return Ok(json!({})); }
+    serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+fn save_preference(app: &tauri::AppHandle, key: &str, value: Value) -> Result<(), String> {
+    let mut preferences = load_preferences(app)?;
+    preferences[key] = value;
+    let directory = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    fs::write(directory.join("ui-preferences.json"), serde_json::to_vec_pretty(&preferences).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_capture_shortcut(app: tauri::AppHandle) -> Result<String, String> {
+    Ok(load_preferences(&app)?["captureShortcut"].as_str().unwrap_or(DEFAULT_SHORTCUT).to_owned())
+}
+
+fn register_capture(app: &tauri::AppHandle, shortcut: &str) -> Result<(), String> {
+    let _ = app.global_shortcut().unregister(shortcut);
+    app.global_shortcut().on_shortcut(shortcut, |app, _, event| {
+        if event.state == ShortcutState::Pressed {
+            if let Some(window) = app.get_webview_window("capture") {
+                let _ = window.show(); let _ = window.set_focus();
+            }
+        }
+    }).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_capture_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<String, String> {
+    if !shortcut.contains("Control") && !shortcut.contains("Command") && !shortcut.contains("Alt") && !shortcut.contains("Shift") {
+        return Err("Include a modifier key".into());
+    }
+    let previous = get_capture_shortcut(app.clone())?;
+    if previous == shortcut { return Ok(shortcut); }
+    register_capture(&app, &shortcut)?;
+    if let Err(error) = save_preference(&app, "captureShortcut", json!(shortcut)) {
+        let _ = app.global_shortcut().unregister(shortcut.as_str()); return Err(error);
+    }
+    let _ = app.global_shortcut().unregister(previous.as_str());
+    Ok(shortcut)
+}
+
+#[tauri::command]
+fn hide_capture_window(app: tauri::AppHandle) -> Result<(), String> {
+    app.get_webview_window("capture").ok_or("Capture window unavailable")?.hide().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_notification_preferences(app: tauri::AppHandle) -> Result<Value, String> {
+    let stored = load_preferences(&app)?;
+    let mut preferences = stored.get("notifications").cloned().unwrap_or_else(|| json!({}));
+    let object = preferences.as_object_mut().ok_or("Invalid notification settings")?;
+    for key in ["enabled", "taskCompletions", "reminders", "resurfacedItems", "problems"] {
+        object.entry(key).or_insert(Value::Bool(true));
+    }
+    object.remove("updates");
+    Ok(preferences)
+}
+
+#[tauri::command]
+fn save_notification_preferences(app: tauri::AppHandle, preferences: Value) -> Result<Value, String> {
+    let keys = ["enabled","taskCompletions","reminders","resurfacedItems","problems"];
+    let object = preferences.as_object().ok_or("Invalid notification settings")?;
+    if object.len() != keys.len() || keys.iter().any(|key| !preferences[*key].is_boolean()) {
+        return Err("Invalid notification settings".into());
+    }
+    save_preference(&app, "notifications", preferences.clone())?;
+    Ok(preferences)
+}
+
+pub(crate) fn send_desktop_notification(app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use mac_usernotifications::AuthorizationStatus;
+
+        let settings = mac_usernotifications::blocking::get_notification_settings()
+            .map_err(|error| format!("Could not read macOS notification access: {error}"))?;
+        match settings.authorization_status {
+            AuthorizationStatus::Authorized
+            | AuthorizationStatus::Provisional
+            | AuthorizationStatus::Ephemeral => {}
+            AuthorizationStatus::NotDetermined => {
+                let granted = notify_rust::request_auth_blocking()
+                    .map_err(|error| format!("Could not request macOS notification access: {error}"))?;
+                if !granted {
+                    return Err("macOS has not granted OJJIPA notification access yet. If you already enabled it, quit and reopen OJJIPA, then retry.".into());
+                }
+            }
+            AuthorizationStatus::Denied => {
+                return Err("macOS reports notification access is denied for this OJJIPA app installation. Check System Settings → Notifications → OJJIPA, then quit and reopen the app.".into());
+            }
+            AuthorizationStatus::Unknown => {
+                // Try delivery and surface the system's concrete error if it fails.
+            }
+        }
+        notify_rust::Notification::new().summary(title).body(body).show().map_err(|error| format!("macOS could not deliver the notification: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        app.notification().builder().title(title).body(body).show().map_err(|error| error.to_string())
+    }
+}
+
+#[tauri::command]
+fn test_desktop_notification(app: tauri::AppHandle) -> Result<(), String> {
+    if get_notification_preferences(app.clone())?["enabled"] != true {
+        return Err("Enable desktop notifications first".into());
+    }
+    send_desktop_notification(&app, "OJJIPA", "Your desktop notifications are connected.")
+}
+
+#[tauri::command]
+async fn workspace_request(state: State<'_, BridgeState>, operation: String, payload: Value) -> Result<Value, String> {
+    if !["workspace.get", "thoughts.clear", "minipas.clear", "findings.clear", "minipa.status", "ai.settings.get", "ai.settings.save", "ai.profile.get", "ai.profile.save", "ai.check", "ai.retry", "ai.memory.forget", "ai.analyze", "ai.run", "chat.submit", "browser.status", "browser.pair", "browser.disconnect"].contains(&operation.as_str()) || !payload.is_object() {
+        return Err("Unsupported workspace request".into());
+    }
+    send_engine_request(&state, operation, payload).await
+}
+
+#[tauri::command]
+async fn reset_app(app: tauri::AppHandle, state: State<'_, BridgeState>) -> Result<(), String> {
+    send_engine_request(&state, "app.reset".into(), json!({})).await?;
+    let preferences = app.path().app_data_dir().map_err(|e| e.to_string())?.join("ui-preferences.json");
+    match fs::remove_file(preferences) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    app.exit(0);
+    Ok(())
 }
 
 /// Tauri commands to get the active window transparency and agent activity
@@ -74,6 +282,10 @@ async fn hold_queue_request(state: State<'_, BridgeState>, operation: String, pa
 }
 
 async fn send_engine_request(state: &BridgeState, operation: String, payload: Value) -> Result<Value, String> {
+    let request_timeout = if operation == "ai.check" { Duration::from_secs(130) } else { bridge::REQUEST_TIMEOUT };
+    if let Some(error) = state.engine_error.lock().map_err(|_| "Engine status unavailable")?.as_ref() {
+        return Err(format!("Engine unavailable: {error}. Restart OJJIPA after correcting the problem."));
+    }
 
     let request_id = format!(
         "dump-{}",
@@ -88,7 +300,7 @@ async fn send_engine_request(state: &BridgeState, operation: String, payload: Va
 
     let _guard = PendingGuard { id: request_id.clone(), pending: state.pending_requests.clone() };
 
-    timeout(bridge::REQUEST_TIMEOUT, async {
+    timeout(request_timeout, async {
     if let Err(error) = state
         .dump_tx
         .send(bridge::DumpRequest {
@@ -101,7 +313,9 @@ async fn send_engine_request(state: &BridgeState, operation: String, payload: Va
         if let Ok(mut requests) = state.pending_requests.lock() {
             requests.remove(&request_id);
         }
-        return Err(format!("Could not queue request for the engine: {error}"));
+        let reason = state.engine_error.lock().ok().and_then(|value| value.clone())
+            .unwrap_or_else(|| error.to_string());
+        return Err(format!("Engine unavailable: {reason}. Restart OJJIPA after correcting the problem."));
     }
 
     reply_rx.await.map_err(|_| "The engine closed the response channel".to_owned())?
@@ -113,29 +327,81 @@ pub fn run() {
     let (activity_tx, activity_rx) = mpsc::channel(32);
     let (dump_tx, dump_rx) = mpsc::channel(32);
     let pending_requests: bridge::PendingRequests = Default::default();
+    let engine_error: Arc<Mutex<Option<String>>> = Default::default();
+    let task_engine_error = engine_error.clone();
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .on_window_event(|window, event| {
+            reader::window_event(window, event);
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "reader" { return; }
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open-workspace" => { if let Some(window) = app.get_webview_window("main") { let _ = window.show(); let _ = window.set_focus(); } },
+            "quick-capture" => { if let Some(window) = app.get_webview_window("capture") { let _ = window.show(); let _ = window.set_focus(); } },
+            "open-reader" => { let app = app.clone(); tauri::async_runtime::spawn(async move { if let Err(error) = reader::reader_open(app,None).await { eprintln!("Reader unavailable: {error}"); } }); },
+            "quit-ojjipa" => app.exit(0),
+            _ => {},
+        })
         .manage(BridgeState {
             activity_tx: activity_tx.clone(),
             dump_tx: dump_tx.clone(),
             pending_requests: pending_requests.clone(),
             next_request_id: AtomicU64::new(1),
+            engine_error,
         })
+        .manage(reader::ReaderState::default())
         .setup(move |app| {
             let app_data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
+            tauri::WebviewWindowBuilder::new(app, "capture", tauri::WebviewUrl::App("index.html".into()))
+                .title("OJJIPA Quick Capture").inner_size(640.0, 210.0)
+                .decorations(false).transparent(true).always_on_top(true).visible(false).build()?;
+            let shortcut = get_capture_shortcut(app.handle().clone()).unwrap_or(DEFAULT_SHORTCUT.to_owned());
+            if let Err(error) = register_capture(app.handle(), &shortcut) {
+                eprintln!("Saved capture shortcut unavailable ({error}); trying the default shortcut");
+                if shortcut != DEFAULT_SHORTCUT {
+                    if let Err(fallback_error) = register_capture(app.handle(), DEFAULT_SHORTCUT) {
+                        eprintln!("Capture shortcut unavailable: {fallback_error}");
+                    } else {
+                        let _ = save_preference(app.handle(), "captureShortcut", json!(DEFAULT_SHORTCUT));
+                    }
+                }
+            }
+            let menu = tauri::menu::Menu::with_items(app, &[
+                &tauri::menu::MenuItem::with_id(app, "open-workspace", "Open OJJIPA", true, None::<&str>)?,
+                &tauri::menu::MenuItem::with_id(app, "quick-capture", "Quick capture", true, None::<&str>)?,
+                &tauri::menu::MenuItem::with_id(app, "open-reader", "Open reader", true, None::<&str>)?,
+                &tauri::menu::MenuItem::with_id(app, "quit-ojjipa", "Quit OJJIPA", true, None::<&str>)?,
+            ])?;
+            if let Some(tray) = app.tray_by_id("main") { tray.set_menu(Some(menu))?; }
             let database_path = app_data_dir.join("ojjipa.sqlite");
 
             let pending_requests = pending_requests.clone();
+            let bridge_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = bridge::run(
+                let result = bridge::run(
                     activity_rx,
                     dump_rx,
-                    pending_requests,
+                    pending_requests.clone(),
                     database_path,
+                    bridge_app,
                 )
-                .await
-                {
-                    eprintln!("OJJIPA engine bridge stopped: {error}");
+                .await;
+                let error = result.err().unwrap_or_else(|| "The Python engine disconnected".to_owned());
+                eprintln!("OJJIPA engine bridge stopped: {error}");
+                if let Ok(mut status) = task_engine_error.lock() {
+                    *status = Some(error.clone());
+                }
+                if let Ok(mut requests) = pending_requests.lock() {
+                    for (_, sender) in requests.drain() {
+                        let _ = sender.send(Err(format!("Engine unavailable: {error}")));
+                    }
                 }
             });
 
@@ -163,12 +429,45 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(|invoke| {
+            // Remote reader pages cannot call app commands, even if they attempt
+            // to construct Tauri IPC manually. Only our local UI may invoke them.
+            let view = invoke.message.webview_ref();
+            let trusted_label = ["main","capture","reader-controls"].contains(&view.label());
+            let trusted_origin = view.url().map(|url| {
+                url.scheme() == "tauri" ||
+                (matches!(url.scheme(),"http"|"https") && url.host_str() == Some("tauri.localhost")) ||
+                (cfg!(debug_assertions) && url.scheme() == "http" &&
+                 matches!(url.host_str(),Some("localhost"|"127.0.0.1")) && url.port() == Some(1420))
+            }).unwrap_or(false);
+            if !trusted_label || !trusted_origin {
+                invoke.resolver.reject("External pages cannot invoke OJJIPA commands");
+                return true;
+            }
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             get_active_window_transparency,
             get_agent_activity,
             submit_dump,
-            hold_queue_request
-        ])
+            hold_queue_request,
+            workspace_request,
+            get_capture_shortcut,
+            save_capture_shortcut,
+            hide_capture_window,
+            get_notification_preferences,
+            save_notification_preferences,
+            test_desktop_notification,
+            open_chrome_extension_folder,
+            set_up_chrome_extension,
+            reset_app,
+            reader::reader_open,
+            reader::reader_get,
+            reader::reader_navigate,
+            reader::reader_close,
+            reader::reader_pin,
+            reader::reader_selection
+        ];
+            handler(invoke)
+        })
         .run(tauri::generate_context!())
         .expect("error running OJJIPA");
 }

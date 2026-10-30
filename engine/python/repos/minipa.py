@@ -62,3 +62,31 @@ class MiniPaRepository:
             "UPDATE minipa SET status = ? WHERE id = ?", (status.value, minipa_id)
         )
         return cursor.rowcount > 0
+
+    def clear_all(self) -> tuple[int, int]:
+        """Delete MiniPas and their dependent execution and finding history."""
+        connection = self._database.connection
+        with self._database.transaction():
+            minipa_ids = [row[0] for row in connection.execute("SELECT id FROM minipa")]
+            if not minipa_ids:
+                return 0, 0
+            marks = ",".join("?" for _ in minipa_ids)
+            report_ids = [row[0] for row in connection.execute(
+                f"SELECT id FROM reports WHERE minipa_id IN ({marks})", minipa_ids
+            )]
+            reports_deleted = len(report_ids)
+            if report_ids:
+                report_marks = ",".join("?" for _ in report_ids)
+                connection.execute(f"DELETE FROM hold_queue WHERE report_id IN ({report_marks})", report_ids)
+                connection.execute(
+                    f"DELETE FROM grandpa_actions WHERE minipa_id IN ({marks}) OR report_id IN ({report_marks})",
+                    [*minipa_ids, *report_ids],
+                )
+            else:
+                connection.execute(f"DELETE FROM grandpa_actions WHERE minipa_id IN ({marks})", minipa_ids)
+            connection.execute(f"DELETE FROM decisions WHERE minipa_id IN ({marks})", minipa_ids)
+            connection.execute(f"DELETE FROM ai_jobs WHERE minipa_id IN ({marks})", minipa_ids)
+            connection.execute(f"DELETE FROM reports WHERE minipa_id IN ({marks})", minipa_ids)
+            connection.execute(f"DELETE FROM minipa WHERE id IN ({marks})", minipa_ids)
+            connection.execute("DELETE FROM seen_items")
+        return len(minipa_ids), reports_deleted
