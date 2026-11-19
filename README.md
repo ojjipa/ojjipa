@@ -30,17 +30,17 @@ Everything runs locally. The database is SQLite. Window titles never leave your 
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                    OJJIPA Desktop (Tauri)                 │
+│                    OJJIPA Desktop (Tauri)                │
 │                                                          │
 │  ┌──────────┐    ┌──────────┐    ┌───────────────────┐   │
-│  │ React UI │◄──►│ Rust core│◄──►│ Python engine      │   │
-│  │          │    │          │    │ (WebSocket bridge)  │   │
+│  │ React UI │◄──►│ Rust core│◄──►│ Python engine     │   │
+│  │          │    │          │    │ (WebSocket bridge)│   │
 │  └──────────┘    └────┬─────┘    └────────┬──────────┘   │
-│                       │                    │              │
-│              macOS/Win │           SQLite   │  Nebius API  │
-│              platform  │           (WAL)   │  (LLM calls) │
-│              APIs      │                   │              │
-└────────────────────────┴───────────────────┴──────────────┘
+│                       │                   │              │
+│              macOS/Win│           SQLite  │  Nebius API  │
+│              platform │           (WAL)   │  (LLM calls) │
+│              APIs     │                   │              │
+└───────────────────────┴────────────────── ┴──────────── ─┘
 ```
 
 | Component | Role |
